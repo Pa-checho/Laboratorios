@@ -13,8 +13,8 @@ RESET:
   ldi r16, 0xFF
   out DDRD, r16
 
-  ldi r16, 0x00
-  out PORTD, r16
+  ldi r17, 1
+  out PORTD,17
 
   ldi r16, 0x00
   out DDRB, r16
@@ -23,35 +23,53 @@ RESET:
   out PORTB, r16
 
 MAIN:
-  ldi r16, 0xAA
-  out PORTD, r16
-
-  rcall RETARDO
-
-  ldi r16, 0x55
-  out PORTD, r16
-
-  rcall RETARDO
-
+  sbis PINB, PB0
+  rjmp POSIBLE_PULSACION
   rjmp MAIN
 
-RETARDO:
-  ldi r18, 41
+POSIBLE_PULSACION:
+  rcall RETARDO_REBOTE
+  sbis PINB, PB0
+  rjmp BOTON_SIGUIENTE
+  rjmp MAIN
+BOTON_SIGUIENTE:
+  inc r17
+  cpi r17, 9
+  brlo MOSTRAR_SECUENCIA
+  ldi r17, 1
 
-RETARDO_1:
+MOSTRAR_SECUENCIA:
+  out PORTD, r17
+
+ESPERAR_LIBERACION:
+  sbis PINB, PB0
+  rjmp ESPERAR_LIBERACION
+  rcall RETARDO_REBOTE
+  sbis PINB, PB0
+  rjmp ESPERAR_LIBERACION
+  rjmp MAIN
+
+RETARDO_REBOTE:
+  ldi r18,2
+
+REBOTE_1:
   ldi r19, 255
-RETARDO_2:
+
+REBOTE_2:
   ldi r20, 255
-RETARDO_3:
+REBOTE_3:
   dec r20
-  brne RETARDO_3
+  brne REBOTE_3
 
   dec r19
-  brne RETARDO_2
+  BRNE REBOTE_2
 
   dec r18
-  brne RETARDO_1
+  brne REBOTE_1
+
   ret
+
+
 
 
 
