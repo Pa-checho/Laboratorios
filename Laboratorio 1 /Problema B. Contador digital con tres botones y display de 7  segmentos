@@ -75,3 +75,96 @@ espera:
     brne esperar              ;Mientras la lectura no sea 0 ( osea mantener presionado el boton) se quede atrapado en este bucle 
     rcall debounce            ;Espera 10ms a que la señal se estabilice 
     rjmp loop                 ;Regresa al bucle principal 
+
+debounce: 
+    ldi temp, 200          ;Cargamos el numero 200 en temp
+
+debounce1:
+    ldi temp2, 255        ;Cargamos el numero 255 en temp2
+
+debounce2:
+    dec temp2             ;Resta 1 al valor de temp2
+    brne debounce2        ;Si temp2 no ha llegado a 0 regresa a debounce2
+
+    dec temp              ;Resta uno al contador externo 
+    brne debouce1         ;Si temp aun no es cero, regresa a debounce1(recarga temp2 con 255
+                          ;y repite todo el bucle interno otra vez)
+    ret                   ;Cuando ambos contadores llegan a 0 termina el tiempo de espera y vuelve a la 
+                          ;intruccion siguiente donde fue llamado (RCALL)
+
+mostrar:
+    rcall mostrar_numero  ;Llamada a subrutina  
+    rjmp loop             ;Devuelve la ejecucion al inicio 
+
+mostrar_numero:
+    cpi contador, 0     ;El contador vale 0?
+    breq n0             ;Si sí salta a n0
+    cpi contador, 1     ;El contador vale 1?
+    breq n1             ;Salta a n1
+    cpi contador, 2
+    breq n2
+    cpi contador, 3
+    breq n3
+    cpi contador, 4
+    breq n4
+    cpi contador, 5
+    breq n5
+    cpi contador, 6
+    breq n6
+    cpi contador, 7
+    breq n7
+    cpi contador, 8
+    breq n8
+    cpi contador, 9
+    breq n9
+    ret
+
+n0:
+   ldi display, 0b00111111 ;Enciende los segmentos a, b, c, d, e y f formando el 0
+   out PORTD, diplay       ;Envia los bits a los pines fisicos
+   ret                     ;Regresa a la subrutina 
+
+n1:
+   ldi display, 0b00000110
+   out PORTD, display
+   ret
+
+n2:
+   ldi display, 0b01011011
+   out PORTD, display
+   ret
+
+n3:  
+   ldi display, 0b01001111
+   out PORTD, display
+   ret
+
+n4:
+   ldi display, 0b01100110
+   out PORTD, display
+   ret
+
+n5:
+   ldi display, 0b01101101
+   out PORTD, display
+   ret
+
+n6:
+   ldi display, 0b01111101
+   out PORTD, display 
+   ret
+
+n7:
+   ldi display, 0b00000111
+   out PORTD, display
+   ret
+
+n8:
+   ldi display, 0b01111111
+   out PORTD, display
+   ret
+
+n9: 
+   ldi display, 0b01101111
+   out PORTD, display
+   ret
