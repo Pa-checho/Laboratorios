@@ -1,1 +1,26 @@
+.include "m328pdef.inc"
+.cseg
+.org 0x0000
+  rjmp RESET
 
+RESET:
+  ldi r16, high(RAMEND)
+  out SPH, r16
+
+  ldi r16, low(RAMEND)
+  out SPL, r16
+
+  ldi r16, 0xFF
+  out DDRD, r16
+
+  ldi r16, 0x00
+  out PORTD, r16
+
+  ldi r16, 0x00
+  out DDRB, r16
+
+  ldi r16, 0x07
+  out PORTB, r16
+
+MAIN:
+  rjmp MAIN
