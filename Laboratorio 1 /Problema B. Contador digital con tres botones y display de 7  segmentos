@@ -1,3 +1,24 @@
-start:
-    inc r16
-    rjmp start
+.include "m328pdef.inc"
+.org 0x00 
+
+    rjmp inicio 
+.def contador = r16      ;Guardamos el numero actual de 0 a 9
+.def botones = r17       ;Almacena la lectrua del puerto de botones
+.def display = r18       ;Guarda la combinacion de pines
+.def temp = r19          ;Registro temporal para calculo 
+.def temp2 = r20         ;Segundo registro temporal 
+
+inicio:
+    ldi temp, high(RAMEND)     ;inicializamos el stack pointer 
+    out SPH, temp              
+
+    ldi temp, low(RAMEND)      ;Para que RCALL y RET sepan a donde regresar 
+    out SPL, temp
+
+    ldi display, 0b01111111
+    out DDRD, display          ;Asignamos los pines de D0 hasta D6 como salidas 
+
+    ldi display, 0b00000000
+    out DDRB, display          ; asignamos los pines de B0 hasta B6 como entradas
+
+    clr contador               ; ponemos el contador en cero 
