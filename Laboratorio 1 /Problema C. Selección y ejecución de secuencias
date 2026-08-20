@@ -26,5 +26,34 @@ MAIN:
   ldi r16, 0xAA
   out PORTD, r16
 
-ESPERAR:
-  rjmp ESPERAR
+  rcall RETARDO
+
+  ldi r16, 0x55
+  out PORTD, r16
+
+  rcall RETARDO
+
+  rjmp MAIN
+
+RETARDO:
+  ldi r18, 41
+
+RETARDO_1:
+  ldi r19, 255
+RETARDO_2:
+  ldi r20, 255
+RETARDO_3:
+  dec r20
+  brne RETARDO_3
+
+  dec r19
+  brne RETARDO_2
+
+  dec r18
+  brne RETARDO_1
+  ret
+
+
+
+
+
