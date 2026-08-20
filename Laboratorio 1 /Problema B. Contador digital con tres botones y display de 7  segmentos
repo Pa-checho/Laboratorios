@@ -19,6 +19,32 @@ inicio:
     out DDRD, display          ;Asignamos los pines de D0 hasta D6 como salidas 
 
     ldi display, 0b00000000
-    out DDRB, display          ; asignamos los pines de B0 hasta B6 como entradas
+    out DDRB, display          ;Asignamos los pines de B0 hasta B6 como entradas
 
-    clr contador               ; ponemos el contador en cero 
+    clr contador               ;Ponemos el contador en cero  
+
+loop:
+    in botones, PINB           ;Leemos el estado de los pines del puerto B
+
+    sbrc botones, 0            ;Si el bit 0 es 0 (boton suleto), salta a la siguiente linea
+    rjmp subir                 ;Si el bit 0 es 1 (boton presionado), salta a subir
+
+    sbrc botones, 1            ;Lo mismo que en la liena 29, verifica el boton bajar
+    rjmp bajar                 ;Si es presionado salta a bajar
+
+    sbrc botones, 2            ;Verificamos el boton de reset
+    rjmp reset                 ;Si es presionado saltamos a reset
+
+    rjmp mostrar               ;Si ningun boton es presionado solo muestra el numero en el que está
+
+subir:
+    rcall debounce             ;LLamamos al antirebote del boton 
+
+    inc contador               ;Sumamos uno
+    cpi contador, 10           ;Si llega a 10
+    brlo esperar_liberacion 
+
+    clr contador               ;Vuelve a 0 para reincicar el ciclo
+    rjmp esperar_liberacion 
+
+
