@@ -41,10 +41,37 @@ subir:
     rcall debounce             ;LLamamos al antirebote del boton 
 
     inc contador               ;Sumamos uno
-    cpi contador, 10           ;Si llega a 10
+    cpi contador, 10           ;Comparamos el valor de contador con 10
     brlo esperar_liberacion 
 
     clr contador               ;Vuelve a 0 para reincicar el ciclo
     rjmp esperar_liberacion 
 
+bajar: 
+    rcall debounce             ;Llamamos al antirrebote del boton 
 
+    tst contador               ;Evalua a contador para verificar si es 0 
+    brne bajar2                ;Si contador no es 0 pasa a bajar2
+ 
+    ldi contador, 9            ;Si el contador si es igaul a 0, se le asigna el num 9
+    rjmp esperar_liberacion  
+
+bajar2:
+    dec contador               ;Resta uno al valor de contador 
+    rjmp esperar_liberacion    ;Espera la liberacion 
+
+reset:
+    rcall debounce             ;LLamaos al antirrebote 
+
+    clr contador               ;Limpiamos el registro colocando un 0
+    rjmp esperar_liberacion    ;Esperamos la liberacion
+
+esperar_liberacion:
+    rcall mostrar_numero      ;Dibuja el nuevo numero en el display 
+
+espera:
+    in botones, PINB          ;Lee los botones 
+    andi botones, 0b00000111  ;Aislamos los pines 0, 1 y 2 para no tener valores basura 
+    brne esperar              ;Mientras la lectura no sea 0 ( osea mantener presionado el boton) se quede atrapado en este bucle 
+    rcall debounce            ;Espera 10ms a que la señal se estabilice 
+    rjmp loop                 ;Regresa al bucle principal 
