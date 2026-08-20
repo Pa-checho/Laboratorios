@@ -23,4 +23,8 @@ RESET:
   out PORTB, r16
 
 MAIN:
-  rjmp MAIN
+  ldi r16, 0xAA
+  out PORTD, r16
+
+ESPERAR:
+  rjmp ESPERAR
