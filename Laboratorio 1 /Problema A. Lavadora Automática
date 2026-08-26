@@ -66,16 +66,36 @@ ESTADO_LISTO:
 
 ESPERAR_LISTO:
 
-
+    ;-----------------------------------------------------
     ; Comprobar SW2.
+    ;
     ; PD1 = 1 -> SW2 presionado.
+    ;-----------------------------------------------------
 
     sbis PIND, 1
 
     rjmp ESPERAR_LISTO
 
 
+    ;-----------------------------------------------------
+    ; Esperar para eliminar rebotes del interruptor.
+    ;-----------------------------------------------------
+
+    rcall DELAY_REBOTE
+
+
+    ;-----------------------------------------------------
+    ; Comprobar nuevamente SW2.
+    ;
+    ; Si ya se soltó, regresar a ESPERAR_LISTO.
+    ;-----------------------------------------------------
+
+    sbic PIND, 1
+
     rjmp SELECCIONAR_CARGA
+
+
+    rjmp ESPERAR_LISTO
 
 
 
@@ -210,6 +230,35 @@ CARGA_SELECCIONADA:
 DELAY_1S:
 
     ldi r20, 64
+
+
+; DELAY ANTIRREBOTE
+; Pequeño retardo utilizado para estabilizar
+; la lectura de los interruptores.
+
+DELAY_REBOTE:
+
+    ldi r20, 10
+
+
+REBOTE_1:
+
+    ldi r21, 255
+
+
+REBOTE_2:
+
+    dec r21
+
+    brne REBOTE_2
+
+
+    dec r20
+
+    brne REBOTE_1
+
+
+    ret
 
 
 DELAY_1:
