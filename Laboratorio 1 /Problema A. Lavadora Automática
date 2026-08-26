@@ -1,1 +1,16 @@
 
+; Proyecto de control de una lavadora mediante
+; lenguaje Assembly.
+
+
+.include "m328pdef.inc"
+.org 0x0000
+
+    rjmp RESET
+
+
+
+
+RESET:
+
+    rjmp RESET
