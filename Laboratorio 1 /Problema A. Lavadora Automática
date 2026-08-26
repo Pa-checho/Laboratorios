@@ -66,33 +66,110 @@ ESTADO_LISTO:
 
 ESPERAR_LISTO:
 
+    ;=====================================================
+    ;                 COMPROBAR SW2
+    ;=====================================================
+
     ;-----------------------------------------------------
-    ; Comprobar SW2.
-    ;
     ; PD1 = 1 -> SW2 presionado.
     ;-----------------------------------------------------
 
     sbis PIND, 1
 
-    rjmp ESPERAR_LISTO
+    rjmp COMPROBAR_SW1
 
 
     ;-----------------------------------------------------
-    ; Esperar para eliminar rebotes del interruptor.
+    ; Antirrebote.
     ;-----------------------------------------------------
 
     rcall DELAY_REBOTE
 
 
     ;-----------------------------------------------------
-    ; Comprobar nuevamente SW2.
-    ;
-    ; Si ya se soltó, regresar a ESPERAR_LISTO.
+    ; Confirmar que SW2 continúa presionado.
     ;-----------------------------------------------------
 
     sbic PIND, 1
 
     rjmp SELECCIONAR_CARGA
+
+
+    rjmp ESPERAR_LISTO
+
+
+
+
+COMPROBAR_SW1:
+
+;=========================================================
+;                 INICIAR LAVADORA
+;=========================================================
+
+INICIAR_LAVADORA:
+
+    ;-----------------------------------------------------
+    ; Comprobar si existe una carga seleccionada.
+    ;
+    ; carga = 3 -> ninguna carga.
+    ;-----------------------------------------------------
+
+    cpi carga, 3
+
+    breq ESPERAR_LISTO
+
+
+    ;-----------------------------------------------------
+    ; Por ahora solamente indicamos que el programa
+    ; recibió la orden de inicio.
+    ;
+    ; El proceso de lavado se agregará posteriormente.
+    ;-----------------------------------------------------
+
+    rjmp PROCESO_INICIADO
+
+
+
+;=========================================================
+;                 PROCESO INICIADO
+;=========================================================
+
+PROCESO_INICIADO:
+
+    ;-----------------------------------------------------
+    ; LED2 = proceso de lavado.
+    ;-----------------------------------------------------
+
+    sbi PORTB, 1
+
+
+    ;-----------------------------------------------------
+    ; Por ahora permanecer aquí.
+    ;
+    ; En el siguiente cambio agregaremos el proceso
+    ; completo de lavado.
+    ;-----------------------------------------------------
+
+    rjmp PROCESO_INICIADO
+
+    ;-----------------------------------------------------
+    ; PD0 = 1 -> SW1 presionado.
+    ;-----------------------------------------------------
+
+    sbis PIND, 0
+
+    rjmp ESPERAR_LISTO
+
+
+
+    ; Antirrebote.
+    rcall DELAY_REBOTE
+
+    ; Confirmar que SW1 continúa presionado.
+
+    sbic PIND, 0
+
+    rjmp INICIAR_LAVADORA
 
 
     rjmp ESPERAR_LISTO
