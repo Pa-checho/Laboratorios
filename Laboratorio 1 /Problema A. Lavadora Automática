@@ -4,23 +4,21 @@
 
 
 .include "m328pdef.inc"
-.org 0x0000
-
-
-; REGISTROS
 .def temp  = r16
 .def carga = r17
 
+.org 0x0000
     rjmp RESET
 
+RESET:
+
     ; Inicializacion del Stack Pointer
-
-
     ldi r16, high(RAMEND)
     out SPH, r16
 
     ldi r16, low(RAMEND)
     out SPL, r16
+
 
     ; INICIALIZACION DE LA CARGA
     ; 0 = chica
@@ -32,7 +30,6 @@
 
 
     ; CONFIGURACION DE PUERTOS
-  
     ; PB0-PB5 = salidas para LED1-LED6
     ldi r16, 0b00111111
     out DDRB, r16
@@ -57,13 +54,78 @@
     ; LED1 = Lavadora lista
     sbi PORTB, 0
 
+    rcall MOSTRAR_CARGA
+
 
 ESTADO_LISTO:
 
-    ; Mantener LED1 encendido.
-    rjmp ESTADO_LISTO
+    sbi PORTB, 0
+
+    rcall MOSTRAR_CARGA
+
+
+ESPERAR_LISTO:
+
+    ; Por ahora permanecemos en el estado LISTO.
+    rjmp ESPERAR_LISTO
+
+
+
+
+; MOSTRAR CARGA
+; carga = 0 -> LED7 = CHICA
+; carga = 1 -> LED8 = MEDIANA
+; carga = 2 -> LED9 = GRANDE
+; carga = 3 -> Ninguna
+
+
+MOSTRAR_CARGA:
+
+    cbi PORTC, 0
+    cbi PORTC, 1
+    cbi PORTC, 2
+
+
+    
+    ; Comprobar si es carga chica.
+    cpi carga, 0
+    breq CARGA_CHICA
+
+
+    ; Comprobar si es carga mediana.
+    cpi carga, 1
+    breq CARGA_MEDIANA
+
+
+    ; Comprobar si es carga grande.
+     cpi carga, 2
+     breq CARGA_GRANDE
+
+    ; carga = 3
+    ; No hay carga seleccionada.
+
+    ret
+
+
+CARGA_CHICA:
+
+    ; LED7 = ON
+    sbi PORTC, 0
+    ret
+
+
+CARGA_MEDIANA:
+
+    ; LED8 = ON
+    sbi PORTC, 1
+    ret
+
+
+
+CARGA_GRANDE:
+
+    ; LED9 = ON
+    sbi PORTC, 2
+    ret
     
 
-RESET:
-
-    rjmp RESET
