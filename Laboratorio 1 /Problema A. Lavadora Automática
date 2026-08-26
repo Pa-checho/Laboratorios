@@ -40,6 +40,15 @@
     out PORTC, r16
 
 
+    ; ESTADO INICIAL
+    ; LED1 = Lavadora lista
+    sbi PORTB, 0
+
+
+ESTADO_LISTO:
+
+    ; Mantener LED1 encendido.
+    rjmp ESTADO_LISTO
     
 
 RESET:
