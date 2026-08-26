@@ -17,6 +17,31 @@
     ldi r16, low(RAMEND)
     out SPL, r16
 
+
+    ; CONFIGURACION DE PUERTOS
+  
+    ; PB0-PB5 = salidas para LED1-LED6
+    ldi r16, 0b00111111
+    out DDRB, r16
+
+    ; PC0-PC3 = salidas para LED7-LED10
+    ldi r16, 0b00001111
+    out DDRC, r16
+
+    ; PD0-PD3 = entradas para SW1-SW4
+    ldi r16, 0b00000000
+    out DDRD, r16
+
+
+    ; Inicia todos los LEDs apagados.
+    ldi r16, 0b00000000
+    out PORTB, r16
+
+    out PORTC, r16
+
+
+    
+
 RESET:
 
     rjmp RESET
