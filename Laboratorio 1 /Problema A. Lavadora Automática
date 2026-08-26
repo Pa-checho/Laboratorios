@@ -6,6 +6,11 @@
 .include "m328pdef.inc"
 .org 0x0000
 
+
+; REGISTROS
+.def temp  = r16
+.def carga = r17
+
     rjmp RESET
 
     ; Inicializacion del Stack Pointer
@@ -16,6 +21,14 @@
 
     ldi r16, low(RAMEND)
     out SPL, r16
+
+    ; INICIALIZACION DE LA CARGA
+    ; 0 = chica
+    ; 1 = mediana
+    ; 2 = grande
+    ; 3 = ninguna
+
+    ldi carga, 3
 
 
     ; CONFIGURACION DE PUERTOS
