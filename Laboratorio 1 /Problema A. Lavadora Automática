@@ -66,9 +66,16 @@ ESTADO_LISTO:
 
 ESPERAR_LISTO:
 
-    ; Por ahora permanecemos en el estado LISTO.
+
+    ; Comprobar SW2.
+    ; PD1 = 1 -> SW2 presionado.
+
+    sbis PIND, 1
+
     rjmp ESPERAR_LISTO
 
+
+    rjmp SELECCIONAR_CARGA
 
 
 
@@ -128,4 +135,108 @@ CARGA_GRANDE:
     sbi PORTC, 2
     ret
     
+;=========================================================
+;                 SELECCIONAR CARGA
+;=========================================================
+;
+; SW2 = PD1
+;
+; Mientras SW2 permanezca presionado:
+;
+; 0 = CHICA
+; 1 = MEDIANA
+; 2 = GRANDE
+;
+; La selección cambia cada 1 segundo.
+;
+;=========================================================
 
+SELECCIONAR_CARGA:
+
+    ;-----------------------------------------------------
+    ; Cambiar a la siguiente carga.
+    ;-----------------------------------------------------
+
+    inc carga
+
+
+    ;-----------------------------------------------------
+    ; Si carga llega a 3, volver a chica.
+    ;-----------------------------------------------------
+
+    cpi carga, 3
+
+    brlo CARGA_VALIDADA
+
+    ldi carga, 0
+
+
+CARGA_VALIDADA:
+
+    ;-----------------------------------------------------
+    ; Mostrar el LED correspondiente.
+    ;-----------------------------------------------------
+
+    rcall MOSTRAR_CARGA
+
+
+    ;-----------------------------------------------------
+    ; Esperar aproximadamente 1 segundo.
+    ;-----------------------------------------------------
+
+    rcall DELAY_1S
+
+
+    ; Comprobar si SW2 continúa presionado.
+
+    ; PD1 = 1 -> continuar seleccionando.
+    ; PD1 = 0 -> terminar selección.
+
+    sbis PIND, 1
+
+    rjmp CARGA_SELECCIONADA
+    rjmp SELECCIONAR_CARGA
+
+
+
+CARGA_SELECCIONADA:
+
+    ; La carga queda almacenada en "carga".
+
+    rjmp ESTADO_LISTO
+
+
+
+DELAY_1S:
+
+    ldi r20, 64
+
+
+DELAY_1:
+
+    ldi r21, 250
+
+
+DELAY_2:
+
+    ldi r22, 250
+
+
+DELAY_3:
+
+    dec r22
+
+    brne DELAY_3
+
+
+    dec r21
+
+    brne DELAY_2
+
+
+    dec r20
+
+    brne DELAY_1
+
+
+    ret
