@@ -5,8 +5,8 @@
 .def numB = r18         ;Operador B
 .def selector = r19     ;Selector S
 .def resultado = r20    ;Resultado F
-.def flags_reg = r21    ;Compia de flags
-.def temp = r22         ;Auxiliar 
+.def temp = r21    ;Compia de flags
+.def lectura = r22         ;Auxiliar 
 
 .org 0x0000
 rjmp setup
@@ -14,27 +14,35 @@ rjmp setup
 ;Configuracion de puertos 
 setup:
     clr temp
-    out DDRB, temp        ;Puerto B: Entradas (PB0-PB3 = A, PB4-PB7 = B)
-    
-    ldi temp, 0x38        ;PC0-PC2 = Entradas (S), PC3-PC5 = Salidas (Flags)
-    out DDRC, temp
+    out DDRB, temp        ;Puerto B: Entradas (PB0-PB3 = A)
+    out DDRC, temp        ;Puerto C: Entradas (A0-A3 = B)
     
     ser temp
     out DDRD, temp        ;Puerto D: Salidas (Resultado F)
 
 ;Bucle Principal (Lectura)
 loop:
-    in lectura_data, PINB
-    
-    mov numA, lectura_data
+;Leer operador A
+    in numA, PINB
     andi numA, 0x0F
-    
-    mov numB, lectura_data
-    swap numB
-    andi numB, 0x0F
 
-    in selector, PINC
-    andi selector, 0x07
+;Leer operador B
+    in numB, PINC
+    andi numA, 0x0F
+
+;Leer selector
+    in temp, PINC
+    lsr temp
+    lsr temp
+    lsr temp
+    lsr temp
+    andi temp, 0x03       ;temp tiene S0 y S1
+
+    in lectura, PINB
+    sbrc lectura, 4       ;Si D12 (PB4) es 1
+    sbr temp, 0x04        ;Activa el bit S2
+    
+    mov selector, temp   ;Selector completo (0 a 7)
 
 ;Enrutador del Selector
     cpi selector, 0
@@ -57,71 +65,64 @@ loop:
 
 ;Operaciones ALU
 op_clear:
-    clr resultado
+    clr resultado         ;Borra el valor de resultado dejando 0
     rjmp evaluar_flags
 
 op_sub:
-    mov resultado, numA
-    sub resultado, numB
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    sub resultado, numB  ;Resta el valor de resultado - numB guardando el resultado, en resultado
     rjmp evaluar_flags
 
 op_add:
-    mov resultado, numA
-    add resultado, numB
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    add resultado, numB  ;Suma el valor de resultado + numB guardando el resultado, en resultado
     rjmp evaluar_flags
 
 op_xor:
-    mov resultado, numA
-    eor resultado, numB
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    eor resultado, numB  ;resultado xor numB guardando el resultado, en resultado
     rjmp evaluar_flags
 
 op_and:
-    mov resultado, numA
-    and resultado, numB
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    and resultado, numB  ;resultado and numB guardando el resultado, en resultado
     rjmp evaluar_flags
 
 op_or:
-    mov resultado, numA
-    or resultado, numB
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    or resultado, numB   ;resultado or numB guardando el resultado, en resultado
     rjmp evaluar_flags
 
 op_shl:
-    mov resultado, numA
-    lsl resultado
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    lsl resultado        ;resultado es desplazado hacia la derecha
     rjmp evaluar_flags
 
 op_inc:
-    mov resultado, numA
-    subi resultado, -1     
+    mov resultado, numA  ;Mueve el valor de numA hacia resultado
+    subi resultado, -1   ;suma 1 al valor de resultado
     rjmp evaluar_flags
 
 ;Manejo de Salidas y Banderas
-evaluar_flags:
+evaluar_flags: 
+    clr temp
+
+;Evaluar Signo
+    sbrc resltado, 7
+    sbr temp,(1<<6)   ;Activa D6 si es negativo
 
 ;Evaluar CARRY
     sbrc resultado, 4
-    sbi PORTC, 3          ;Enciende LED Carry (PC3)
-    sbrs resultado, 4
-    cbi PORTC, 3          ;Apaga LED Carry (PC3)
+    sbr temp, (1<<4)   ;Activa D4
 
-;Limitar el resultado a 4 bits (PD0-PD3) y enviarlo a PORTD
-    andi resultado, 0x0F  ;Mantiene solo bits 0 a 3
-    out PORTD, resultado  ;Muestra F (PD0-PD3 activos)
+;Recorta resultado a 4 bits para los LEDs de salida
+    brn no_es_cero
+    sbr temp, (1<<5)    ;Activa D5
 
-;Evaluar CERO
-    breq es_cero          ;'andi' actualiza la bandera Zero si los 4 bits son 0
-    cbi PORTC, 4          ;Apaga LED Cero (PC4)
-    rjmp eval_signo
-
-es_cero:
-    sbi PORTC, 4          ;Enciende LED Cero (PC4)
-
-eval_signo:
-
-;Evaluar SIGNO
-    sbrc resultado, 3
-    sbi PORTC, 5          ;Enciende LED Signo (PC5)
-    sbrs resultado, 3
-    cbi PORTC, 5          ;Apaga LED Signo (PC5)
+no_es_cero:
+    ;unir resultados (D0-D3) y flags (D4-D6) en el puerto D
+    or resultado, temp
+    out PORTD, resultado
 
     rjmp loop
+
