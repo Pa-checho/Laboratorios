@@ -111,13 +111,13 @@ ESPERAR_AGUA:
     rjmp PROCESO_INICIADO
 
 PROCESO_INICIADO:
-
-    ;-----------------------------------------------------
-    ; LED2 = proceso de lavado
-    ;-----------------------------------------------------
-
     sbi PORTB, 1
     rcall PROCESO_LAVADO
+
+    ; Terminado el lavado, apagar LED2.
+    cbi PORTB, 1
+
+    rcall PROCESO_CENTRIFUGADO
     rjmp ESTADO_LISTO
 
 
@@ -146,7 +146,6 @@ PROCESO_LAVADO:
 CICLO_LAVADO:
     ; Encender LED5.
     ; LED5 representa el giro del tambor.
- 
 
     sbi PORTB, 4
 
@@ -161,6 +160,75 @@ CICLO_LAVADO:
     ; corresponde a carga grande.
 
     rjmp GIRO_GRANDE
+
+;=========================================================
+;              PROCESO DE CENTRIFUGADO
+;=========================================================
+;
+; LED3 = proceso de centrifugado
+; LED5 = motor/tambor girando
+;
+; Tiempo:
+;
+; CHICA   = 15 segundos
+; MEDIANA = 18 segundos
+; GRANDE  = 21 segundos
+;
+;=========================================================
+
+PROCESO_CENTRIFUGADO:
+
+    ;-----------------------------------------------------
+    ; LED3 = ON
+    ; Indica que comenzó el centrifugado.
+    ;-----------------------------------------------------
+
+    sbi PORTB, 2
+
+    ;-----------------------------------------------------
+    ; LED5 = ON
+    ; Representa el motor/tambor girando.
+    ;-----------------------------------------------------
+
+    sbi PORTB, 4
+
+    ;-----------------------------------------------------
+    ; Comprobar la carga seleccionada.
+    ;-----------------------------------------------------
+
+    cpi carga, 0
+    breq CENTRIFUGADO_CHICA
+    cpi carga, 1
+    breq CENTRIFUGADO_MEDIANA
+
+    ; Si no es chica ni mediana,
+    ; corresponde a carga grande.
+
+    rjmp CENTRIFUGADO_GRANDE
+
+
+CENTRIFUGADO_CHICA:
+    rcall DELAY_15S
+    rjmp FIN_CENTRIFUGADO
+
+
+CENTRIFUGADO_MEDIANA:
+    rcall DELAY_18S
+    rjmp FIN_CENTRIFUGADO
+
+
+CENTRIFUGADO_GRANDE:
+    rcall DELAY_21S
+
+FIN_CENTRIFUGADO:
+    cbi PORTB, 4
+
+    ;-----------------------------------------------------
+    ; Apagar indicador de centrifugado.
+    ;-----------------------------------------------------
+
+    cbi PORTB, 2
+    ret
 
 
 GIRO_CHICA:
@@ -336,6 +404,32 @@ DELAY_3:
     brne DELAY_1
     ret
 
+
+DELAY_15S:
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_3S
+    ret
+
+
+DELAY_18S:
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_3S
+    rcall DELAY_3S
+    ret
+
+
+DELAY_21S:
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_1S
+    ret
 
 ; DELAY ANTIRREBOTE
 ; Pequeño retardo utilizado para estabilizar lectura de los interruptores
