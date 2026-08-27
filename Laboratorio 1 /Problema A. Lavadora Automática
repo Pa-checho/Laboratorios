@@ -1,7 +1,4 @@
 
-; Proyecto de control de una lavadora mediante
-; lenguaje Assembly.
-
 
 .include "m328pdef.inc"
 .def temp  = r16
@@ -29,7 +26,7 @@ RESET:
     ldi carga, 3
 
 
-    ; CONFIGURACION DE PUERTOS
+    ; CONFIGURACION DE PUERTOS 
     ; PB0-PB5 = salidas para LED1-LED6
     ldi r16, 0b00111111
     out DDRB, r16
@@ -44,57 +41,36 @@ RESET:
 
 
     ; Inicia todos los LEDs apagados.
-    ldi r16, 0b00000000
+    ldi r16, 0
+    out PORTD, r16
     out PORTB, r16
-
     out PORTC, r16
 
-
-    ; ESTADO INICIAL
-    ; LED1 = Lavadora lista
-    sbi PORTB, 0
-
-    rcall MOSTRAR_CARGA
-
+    rjmp ESTADO_LISTO
 
 ESTADO_LISTO:
 
+    
+    ; LED1 = Lavadora lista
     sbi PORTB, 0
 
+    ; Mostrar carga seleccionada
     rcall MOSTRAR_CARGA
 
 
 ESPERAR_LISTO:
 
-    ;=====================================================
-    ;                 COMPROBAR SW2
-    ;=====================================================
-
-    ;-----------------------------------------------------
+    ; COMPROBAR SW2
     ; PD1 = 1 -> SW2 presionado.
-    ;-----------------------------------------------------
-
     sbis PIND, 1
-
     rjmp COMPROBAR_SW1
 
-
-    ;-----------------------------------------------------
     ; Antirrebote.
-    ;-----------------------------------------------------
-
     rcall DELAY_REBOTE
 
-
-    ;-----------------------------------------------------
     ; Confirmar que SW2 continúa presionado.
-    ;-----------------------------------------------------
-
     sbic PIND, 1
-
     rjmp SELECCIONAR_CARGA
-
-
     rjmp ESPERAR_LISTO
 
 
@@ -102,140 +78,57 @@ ESPERAR_LISTO:
 
 COMPROBAR_SW1:
 
-;=========================================================
-;                 INICIAR LAVADORA
-;=========================================================
+    ; Revisar SW1
+    ; PD0 = 1
+    sbis PIND, 0
+    
+    rjmp ESPERAR_LISTO
+
+    ; Antirrebote
+    rcall DELAY_REBOTE
+
+    ; Confirmar pulsación
+    sbic PIND, 0
+
+    rjmp INICIAR_LAVADORA
+
+    rjmp ESPERAR_LISTO
+
 
 INICIAR_LAVADORA:
 
-    ;-----------------------------------------------------
-    ; Comprobar si existe una carga seleccionada.
-    ;
-    ; carga = 3 -> ninguna carga.
-    ;-----------------------------------------------------
+; Verificar que exista una carga seleccionada
 
     cpi carga, 3
 
     breq ESPERAR_LISTO
 
+    rjmp VERIFICAR_CONDICIONES
 
-    ;-----------------------------------------------------
-    ; Por ahora solamente indicamos que el programa
-    ; recibió la orden de inicio.
-    ;
-    ; El proceso de lavado se agregará posteriormente.
-    ;-----------------------------------------------------
+
+
+VERIFICAR_CONDICIONES:
+
+ESPERAR_PUERTA:
+
+    sbis PIND, 2
+    rjmp ESPERAR_PUERTA
+
+
+ESPERAR_AGUA:
+
+    sbis PIND, 3
+    rjmp ESPERAR_AGUA
 
     rjmp PROCESO_INICIADO
-
-
-
-;=========================================================
-;                 PROCESO INICIADO
-;=========================================================
 
 PROCESO_INICIADO:
 
-    ;-----------------------------------------------------
-    ; LED2 = proceso de lavado.
-    ;-----------------------------------------------------
-
     sbi PORTB, 1
-
-
-    ;-----------------------------------------------------
-    ; Por ahora permanecer aquí.
-    ;
-    ; En el siguiente cambio agregaremos el proceso
-    ; completo de lavado.
-    ;-----------------------------------------------------
-
     rjmp PROCESO_INICIADO
 
-    ;-----------------------------------------------------
-    ; PD0 = 1 -> SW1 presionado.
-    ;-----------------------------------------------------
-
-    sbis PIND, 0
-
-    rjmp ESPERAR_LISTO
-
-
-
-    ; Antirrebote.
-    rcall DELAY_REBOTE
-
-    ; Confirmar que SW1 continúa presionado.
-
-    sbic PIND, 0
-
-    rjmp INICIAR_LAVADORA
-
-
-    rjmp ESPERAR_LISTO
-
-
-
-; MOSTRAR CARGA
-; carga = 0 -> LED7 = CHICA
-; carga = 1 -> LED8 = MEDIANA
-; carga = 2 -> LED9 = GRANDE
-; carga = 3 -> Ninguna
-
-
-MOSTRAR_CARGA:
-
-    cbi PORTC, 0
-    cbi PORTC, 1
-    cbi PORTC, 2
-
-
     
-    ; Comprobar si es carga chica.
-    cpi carga, 0
-    breq CARGA_CHICA
 
-
-    ; Comprobar si es carga mediana.
-    cpi carga, 1
-    breq CARGA_MEDIANA
-
-
-    ; Comprobar si es carga grande.
-     cpi carga, 2
-     breq CARGA_GRANDE
-
-    ; carga = 3
-    ; No hay carga seleccionada.
-
-    ret
-
-
-CARGA_CHICA:
-
-    ; LED7 = ON
-    sbi PORTC, 0
-    ret
-
-
-CARGA_MEDIANA:
-
-    ; LED8 = ON
-    sbi PORTC, 1
-    ret
-
-
-
-CARGA_GRANDE:
-
-    ; LED9 = ON
-    sbi PORTC, 2
-    ret
-    
-;=========================================================
-;                 SELECCIONAR CARGA
-;=========================================================
-;
 ; SW2 = PD1
 ;
 ; Mientras SW2 permanezca presionado:
@@ -245,26 +138,13 @@ CARGA_GRANDE:
 ; 2 = GRANDE
 ;
 ; La selección cambia cada 1 segundo.
-;
-;=========================================================
+
 
 SELECCIONAR_CARGA:
 
-    ;-----------------------------------------------------
-    ; Cambiar a la siguiente carga.
-    ;-----------------------------------------------------
-
     inc carga
-
-
-    ;-----------------------------------------------------
-    ; Si carga llega a 3, volver a chica.
-    ;-----------------------------------------------------
-
     cpi carga, 3
-
     brlo CARGA_VALIDADA
-
     ldi carga, 0
 
 
@@ -302,67 +182,92 @@ CARGA_SELECCIONADA:
 
     rjmp ESTADO_LISTO
 
+; MOSTRAR CARGA
+; carga = 0 -> LED7 = CHICA
+; carga = 1 -> LED8 = MEDIANA
+; carga = 2 -> LED9 = GRANDE
+; carga = 3 -> Ninguna
 
+
+MOSTRAR_CARGA:
+
+    cbi PORTC, 0
+    cbi PORTC, 1
+    cbi PORTC, 2
+    
+    ; Comprobar si es carga chica.
+    cpi carga, 0
+    breq CARGA_CHICA
+
+
+    ; Comprobar si es carga mediana.
+    cpi carga, 1
+    breq CARGA_MEDIANA
+
+
+    ; Comprobar si es carga grande.
+     cpi carga, 2
+     breq CARGA_GRANDE
+
+    ; carga = 3
+    ; No hay carga seleccionada.
+    ret
+
+
+CARGA_CHICA:
+
+    ; LED7 = ON
+    sbi PORTC, 0
+    ret
+
+
+CARGA_MEDIANA:
+
+    ; LED8 = ON
+    sbi PORTC, 1
+    ret
+
+
+CARGA_GRANDE:
+
+    ; LED9 = ON
+    sbi PORTC, 2
+    ret
 
 DELAY_1S:
-
     ldi r20, 64
+
+DELAY_1:
+    ldi r21, 250
+
+DELAY_2:
+    ldi r22, 250
+
+DELAY_3:
+    dec r22
+    brne DELAY_3
+    dec r21
+    brne DELAY_2
+    dec r20
+    brne DELAY_1
+    ret
 
 
 ; DELAY ANTIRREBOTE
-; Pequeño retardo utilizado para estabilizar
-; la lectura de los interruptores.
+; Pequeño retardo utilizado para estabilizar lectura de los interruptores
 
 DELAY_REBOTE:
-
     ldi r20, 10
 
-
 REBOTE_1:
-
     ldi r21, 255
 
-
 REBOTE_2:
-
     dec r21
-
     brne REBOTE_2
-
-
     dec r20
-
     brne REBOTE_1
-
-
     ret
 
 
-DELAY_1:
 
-    ldi r21, 250
-
-
-DELAY_2:
-
-    ldi r22, 250
-
-
-DELAY_3:
-
-    dec r22
-
-    brne DELAY_3
-
-
-    dec r21
-
-    brne DELAY_2
-
-
-    dec r20
-
-    brne DELAY_1
-
-
-    ret
