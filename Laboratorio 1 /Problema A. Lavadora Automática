@@ -45,7 +45,6 @@ RESET:
     out PORTD, r16
     out PORTB, r16
     out PORTC, r16
-
     rjmp ESTADO_LISTO
 
 ESTADO_LISTO:
@@ -90,8 +89,7 @@ COMPROBAR_SW1:
 
 
 INICIAR_LAVADORA:
-; Verificar que exista una carga seleccionada
-
+    ; Verificar que exista una carga seleccionada
     cpi carga, 3
     breq ESPERAR_LISTO
     rjmp VERIFICAR_CONDICIONES
@@ -118,7 +116,8 @@ PROCESO_INICIADO:
     cbi PORTB, 1
 
     rcall PROCESO_CENTRIFUGADO
-    rjmp ESTADO_LISTO
+    call PROCESO_SECADO
+    rjmp FIN_PROCESO
 
 
 ; PROCESO DE LAVADO
@@ -206,6 +205,125 @@ PROCESO_CENTRIFUGADO:
 
     rjmp CENTRIFUGADO_GRANDE
 
+;=========================================================
+;                  PROCESO DE SECADO
+;
+; LED4 = indicador de proceso de secado
+;
+; LED6 = motor girando hacia la derecha
+; LED5 = motor girando hacia la izquierda
+;
+; Carga chica:
+;     5 s derecha
+;     3 s pausa
+;     5 s izquierda
+;
+; Carga mediana:
+;     7 s derecha
+;     5 s pausa
+;     7 s izquierda
+;
+; Carga grande:
+;     9 s derecha
+;     7 s pausa
+;     9 s izquierda
+;
+;=========================================================
+
+PROCESO_SECADO:
+
+    ;-----------------------------------------------------
+    ; LED4 = ON
+    ; Indica proceso de secado.
+    ;-----------------------------------------------------
+
+    sbi PORTB, 3
+
+
+    ;-----------------------------------------------------
+    ; Comprobar carga.
+    ;-----------------------------------------------------
+
+    cpi carga, 0
+
+    breq SECADO_CHICA
+
+
+    cpi carga, 1
+
+    breq SECADO_MEDIANA
+
+
+    ; Si no es chica ni mediana,
+    ; corresponde a carga grande.
+
+    rjmp SECADO_GRANDE
+
+
+SECADO_CHICA:
+
+    ;-----------------------------------------------------
+    ; Giro hacia la derecha.
+    ; LED6 = ON
+    ;-----------------------------------------------------
+
+    sbi PORTB, 5
+    rcall DELAY_5S
+    cbi PORTB, 5
+
+    rcall DELAY_3S
+
+    ;-----------------------------------------------------
+    ; Giro hacia la izquierda.
+    ; LED5 = ON
+    ;-----------------------------------------------------
+
+    sbi PORTB, 4
+    rcall DELAY_5S
+    cbi PORTB, 4
+    ret
+
+
+SECADO_MEDIANA:
+
+    ;-----------------------------------------------------
+    ; Giro hacia la derecha.
+    ;-----------------------------------------------------
+
+    sbi PORTB, 5
+    rcall DELAY_7S
+    cbi PORTB, 5
+
+    rcall DELAY_5S
+
+    ; Giro hacia la izquierda.
+
+    sbi PORTB, 4
+    rcall DELAY_7S
+    cbi PORTB, 4
+    ret
+
+
+SECADO_GRANDE:
+
+    ; Giro hacia la derecha.
+
+    sbi PORTB, 5
+    rcall DELAY_9S
+    cbi PORTB, 5
+
+
+    rcall DELAY_7S
+
+    ; Giro hacia la izquierda.
+
+    sbi PORTB, 4
+    rcall DELAY_9S
+    cbi PORTB, 4
+    ret
+
+
+
 
 CENTRIFUGADO_CHICA:
     rcall DELAY_15S
@@ -223,9 +341,7 @@ CENTRIFUGADO_GRANDE:
 FIN_CENTRIFUGADO:
     cbi PORTB, 4
 
-    ;-----------------------------------------------------
     ; Apagar indicador de centrifugado.
-    ;-----------------------------------------------------
 
     cbi PORTB, 2
     ret
@@ -426,6 +542,24 @@ DELAY_21S:
     rcall DELAY_4S
     rcall DELAY_4S
     rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_4S
+    rcall DELAY_1S
+    ret
+
+DELAY_5S:
+    rcall DELAY_4S
+    rcall DELAY_1S
+    ret
+
+
+DELAY_7S:
+    rcall DELAY_4S
+    rcall DELAY_3S
+    ret
+
+
+DELAY_9S:
     rcall DELAY_4S
     rcall DELAY_4S
     rcall DELAY_1S
