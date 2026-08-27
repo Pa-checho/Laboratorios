@@ -1,1 +1,122 @@
+.include "m328p.inc"
 
+.def lectura_data = r16 ;Entrada puerto B (A y B)
+.def numA = r17         ;Operador A
+.def numB = r18         ;Operador B
+.def selector = r19     ;Selector S
+.def resultado = r20    ;Resultado F
+.def flags_reg = r21    ;Compia de flags
+.def temp = r22         ;Auxiliar 
+
+.org 0x0000
+rjmp setup
+
+;Configuracion de puertos 
+setup:
+    clr temp
+    out DDRB, temp        ;Puerto B: Entradas (PB0-PB3 = A, PB4-PB7 = B)
+    
+    ldi temp, 0x38        ;PC0-PC2 = Entradas (S), PC3-PC5 = Salidas (Flags)
+    out DDRC, temp
+    
+    ser temp
+    out DDRD, temp        ;Puerto D: Salidas (Resultado F)
+
+;Bucle Principal (Lectura)
+loop:
+    in lectura_data, PINB
+    
+    mov numA, lectura_data
+    andi numA, 0x0F
+    
+    mov numB, lectura_data
+    swap numB
+    andi numB, 0x0F
+
+    in selector, PINC
+    andi selector, 0x07
+
+;Enrutador del Selector
+    cpi selector, 0
+    breq op_clear
+    cpi selector, 1
+    breq op_sub
+    cpi selector, 2
+    breq op_add
+    cpi selector, 3
+    breq op_xor
+    cpi selector, 4
+    breq op_and
+    cpi selector, 5
+    breq op_or
+    cpi selector, 6
+    breq op_shl
+    cpi selector, 7
+    breq op_inc
+    rjmp loop
+
+;Operaciones ALU
+op_clear:
+    clr resultado
+    rjmp evaluar_flags
+
+op_sub:
+    mov resultado, numA
+    sub resultado, numB
+    rjmp evaluar_flags
+
+op_add:
+    mov resultado, numA
+    add resultado, numB
+    rjmp evaluar_flags
+
+op_xor:
+    mov resultado, numA
+    eor resultado, numB
+    rjmp evaluar_flags
+
+op_and:
+    mov resultado, numA
+    and resultado, numB
+    rjmp evaluar_flags
+
+op_or:
+    mov resultado, numA
+    or resultado, numB
+    rjmp evaluar_flags
+
+op_shl:
+    mov resultado, numA
+    lsl resultado
+    rjmp evaluar_flags
+
+op_inc:
+    mov resultado, numA
+    subi resultado, -1     
+    rjmp evaluar_flags
+
+;Manejo de Salidas y Banderas
+evaluar_flags:
+    in flags_reg, SREG     
+
+    out PORTD, resultado   
+
+    ;Evaluacion de Carry (Bit 0)
+    sbrc flags_reg, 0
+    sbi PORTC, 3
+    sbrs flags_reg, 0
+    cbi PORTC, 3
+
+    ;Evaluacion de Cero (Bit 1)
+    sbrc flags_reg, 1
+    sbi PORTC, 4
+    sbrs flags_reg, 1
+    cbi PORTC, 4
+
+    ;Evaluacion de Signo (Bit 2)
+    sbrc flags_reg, 2
+    sbi PORTC, 5
+    sbrs flags_reg, 2
+    cbi PORTC, 5
+
+    rjmp loop
