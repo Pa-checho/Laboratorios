@@ -1,4 +1,4 @@
-.include "m328p.inc"
+.include "m328pef.inc"
 
 .def lectura_data = r16 ;Entrada puerto B (A y B)
 .def numA = r17         ;Operador A
@@ -97,26 +97,31 @@ op_inc:
 
 ;Manejo de Salidas y Banderas
 evaluar_flags:
-    in flags_reg, SREG     
 
-    out PORTD, resultado   
+;Evaluar CARRY
+    sbrc resultado, 4
+    sbi PORTC, 3          ;Enciende LED Carry (PC3)
+    sbrs resultado, 4
+    cbi PORTC, 3          ;Apaga LED Carry (PC3)
 
-    ;Evaluacion de Carry (Bit 0)
-    sbrc flags_reg, 0
-    sbi PORTC, 3
-    sbrs flags_reg, 0
-    cbi PORTC, 3
+;Limitar el resultado a 4 bits (PD0-PD3) y enviarlo a PORTD
+    andi resultado, 0x0F  ;Mantiene solo bits 0 a 3
+    out PORTD, resultado  ;Muestra F (PD0-PD3 activos)
 
-    ;Evaluacion de Cero (Bit 1)
-    sbrc flags_reg, 1
-    sbi PORTC, 4
-    sbrs flags_reg, 1
-    cbi PORTC, 4
+;Evaluar CERO
+    breq es_cero          ;'andi' actualiza la bandera Zero si los 4 bits son 0
+    cbi PORTC, 4          ;Apaga LED Cero (PC4)
+    rjmp eval_signo
 
-    ;Evaluacion de Signo (Bit 2)
-    sbrc flags_reg, 2
-    sbi PORTC, 5
-    sbrs flags_reg, 2
-    cbi PORTC, 5
+es_cero:
+    sbi PORTC, 4          ;Enciende LED Cero (PC4)
+
+eval_signo:
+
+;Evaluar SIGNO
+    sbrc resultado, 3
+    sbi PORTC, 5          ;Enciende LED Signo (PC5)
+    sbrs resultado, 3
+    cbi PORTC, 5          ;Apaga LED Signo (PC5)
 
     rjmp loop
