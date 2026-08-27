@@ -49,8 +49,6 @@ RESET:
     rjmp ESTADO_LISTO
 
 ESTADO_LISTO:
-
-    
     ; LED1 = Lavadora lista
     sbi PORTB, 0
 
@@ -59,7 +57,6 @@ ESTADO_LISTO:
 
 
 ESPERAR_LISTO:
-
     ; COMPROBAR SW2
     ; PD1 = 1 -> SW2 presionado.
     sbis PIND, 1
@@ -77,7 +74,6 @@ ESPERAR_LISTO:
 
 
 COMPROBAR_SW1:
-
     ; Revisar SW1
     ; PD0 = 1
     sbis PIND, 0
@@ -89,20 +85,15 @@ COMPROBAR_SW1:
 
     ; Confirmar pulsación
     sbic PIND, 0
-
     rjmp INICIAR_LAVADORA
-
     rjmp ESPERAR_LISTO
 
 
 INICIAR_LAVADORA:
-
 ; Verificar que exista una carga seleccionada
 
     cpi carga, 3
-
     breq ESPERAR_LISTO
-
     rjmp VERIFICAR_CONDICIONES
 
 
@@ -110,23 +101,116 @@ INICIAR_LAVADORA:
 VERIFICAR_CONDICIONES:
 
 ESPERAR_PUERTA:
-
     sbis PIND, 2
     rjmp ESPERAR_PUERTA
 
 
 ESPERAR_AGUA:
-
     sbis PIND, 3
     rjmp ESPERAR_AGUA
-
     rjmp PROCESO_INICIADO
 
 PROCESO_INICIADO:
 
-    sbi PORTB, 1
-    rjmp PROCESO_INICIADO
+    ;-----------------------------------------------------
+    ; LED2 = proceso de lavado
+    ;-----------------------------------------------------
 
+    sbi PORTB, 1
+    rcall PROCESO_LAVADO
+    rjmp ESTADO_LISTO
+
+
+; PROCESO DE LAVADO
+;
+; 5 ciclos de:
+;
+;    GIRAR  -> LED5 ON
+;    PAUSA  -> LED5 OFF
+;
+; Ajuste por carga:
+;
+; CHICA   -> 2 s giro / 1 s pausa
+; MEDIANA -> 3 s giro / 2 s pausa
+; GRANDE  -> 4 s giro / 3 s pausa
+
+
+PROCESO_LAVADO:
+
+    ; Contador de ciclos
+    ; Se realizarán 5 ciclos.
+
+    ldi r18, 5
+
+
+CICLO_LAVADO:
+    ; Encender LED5.
+    ; LED5 representa el giro del tambor.
+ 
+
+    sbi PORTB, 4
+
+    ; Determinar tiempo de giro según carga.
+ 
+    cpi carga, 0
+    breq GIRO_CHICA
+    cpi carga, 1
+    breq GIRO_MEDIANA
+
+    ; Si no es chica ni mediana,
+    ; corresponde a carga grande.
+
+    rjmp GIRO_GRANDE
+
+
+GIRO_CHICA:
+    rcall DELAY_2S
+    rjmp FIN_GIRO
+
+
+GIRO_MEDIANA:
+    rcall DELAY_3S
+    rjmp FIN_GIRO
+
+
+GIRO_GRANDE:
+    rcall DELAY_4S
+
+
+FIN_GIRO:
+    ; Apagar LED5.
+    ; El tambor deja de girar.
+
+
+    cbi PORTB, 4
+
+    ; Determinar tiempo de pausa según carga.
+
+    cpi carga, 0
+    breq PAUSA_CHICA
+    cpi carga, 1
+    breq PAUSA_MEDIANA
+    rjmp PAUSA_GRANDE
+
+
+PAUSA_CHICA:
+    rcall DELAY_1S
+    rjmp FIN_PAUSA
+
+
+PAUSA_MEDIANA:
+    rcall DELAY_2S
+    rjmp FIN_PAUSA
+
+
+PAUSA_GRANDE:
+    rcall DELAY_3S
+
+
+FIN_PAUSA:
+    dec r18
+    brne CICLO_LAVADO
+    ret
     
 
 ; SW2 = PD1
@@ -141,7 +225,6 @@ PROCESO_INICIADO:
 
 
 SELECCIONAR_CARGA:
-
     inc carga
     cpi carga, 3
     brlo CARGA_VALIDADA
@@ -149,23 +232,11 @@ SELECCIONAR_CARGA:
 
 
 CARGA_VALIDADA:
-
-    ;-----------------------------------------------------
-    ; Mostrar el LED correspondiente.
-    ;-----------------------------------------------------
-
     rcall MOSTRAR_CARGA
-
-
-    ;-----------------------------------------------------
-    ; Esperar aproximadamente 1 segundo.
-    ;-----------------------------------------------------
-
     rcall DELAY_1S
 
 
     ; Comprobar si SW2 continúa presionado.
-
     ; PD1 = 1 -> continuar seleccionando.
     ; PD1 = 0 -> terminar selección.
 
@@ -178,8 +249,6 @@ CARGA_VALIDADA:
 
 CARGA_SELECCIONADA:
 
-    ; La carga queda almacenada en "carga".
-
     rjmp ESTADO_LISTO
 
 ; MOSTRAR CARGA
@@ -190,7 +259,6 @@ CARGA_SELECCIONADA:
 
 
 MOSTRAR_CARGA:
-
     cbi PORTC, 0
     cbi PORTC, 1
     cbi PORTC, 2
@@ -215,27 +283,43 @@ MOSTRAR_CARGA:
 
 
 CARGA_CHICA:
-
     ; LED7 = ON
     sbi PORTC, 0
     ret
 
 
 CARGA_MEDIANA:
-
     ; LED8 = ON
     sbi PORTC, 1
     ret
 
 
 CARGA_GRANDE:
-
     ; LED9 = ON
     sbi PORTC, 2
     ret
 
 DELAY_1S:
     ldi r20, 64
+
+DELAY_2S:
+    rcall DELAY_1S
+    rcall DELAY_1S
+    ret
+
+
+DELAY_3S:
+    rcall DELAY_1S
+    rcall DELAY_1S
+    rcall DELAY_1S
+    ret
+
+DELAY_4S:
+    rcall DELAY_1S
+    rcall DELAY_1S
+    rcall DELAY_1S
+    rcall DELAY_1S
+    ret
 
 DELAY_1:
     ldi r21, 250
