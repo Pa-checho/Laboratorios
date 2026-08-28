@@ -1,0 +1,14 @@
+version,0,0,0:0.9.2
+scale,0,0,0:0.700000
+position,865,72,548:576
+boardp,242,192,587:394
+spare_on,0,0,0:1
+osc_on,0,0,0:0
+useAlias,0,0,0:0
+debug,1,1,0:
+osc_cfg,13,392,0:1.000000,0.000000,1,1,2.500000,1,5,1,0,0
+osc_ch1,0,0,0:2.000000,0.000000,1,#FF0000,0,17  PB3/~11
+osc_ch2,0,0,0:2.000000,0.000000,0,#00FF00,0,2  PD0/0
+Text Box,317,46,0:12,5,4,https://lcgamboa.github.io/picsimlab_examples/board_Arduino_Uno.html#board_Arduino_Uno_atmega328p_stepper_onerevolution%Examplesource info
+7 Segments Display,326,284,0:2,3,4,5,6,11,12,13,16,17,18,19,1,1
+Push Buttons,296,602,0:14,15,16,0,0,0,0,0,1,0,8
