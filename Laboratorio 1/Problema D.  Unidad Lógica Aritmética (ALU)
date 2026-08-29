@@ -107,9 +107,10 @@ op_inc:
 evaluar_flags:
     clr temp              ;Limpia el registro auxiliar de banderas
 
-    ;1. Evaluar Signo REAL (Bit 7 del resultado de 8 bits)
-    sbrc resultado, 7
-    sbr temp, (1<<6)      ;Activa D6 (Signo) SOLO si el resultado es negativo
+    ;1. Evaluar Negativo sobre el resultado final de 4 bits
+    ;F3 es el bit de signo en complemento a dos de 4 bits
+    sbrc resultado, 3
+    sbr temp, (1<<6)
 
     ;2. Evaluar Carry (Bit 4 del resultado de 8 bits -> D4)
     sbrc resultado, 4
