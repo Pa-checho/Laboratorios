@@ -1,36 +1,36 @@
-.include "m328pef.inc"
+.include "m328pdef.inc"
 
-.def lectura_data = r16 ;Entrada puerto B (A y B)
-.def numA = r17         ;Operador A
-.def numB = r18         ;Operador B
-.def selector = r19     ;Selector S
-.def resultado = r20    ;Resultado F
-.def temp = r21    ;Compia de flags
-.def lectura = r22         ;Auxiliar 
+;Registros
+.def numA = r17        ;Operando A (4 bits, D8-D11)
+.def numB = r18        ;Operando B (4 bits, A0-A3)
+.def selector = r19    ;Selector S (3 bits, S0=A4, S1=A5, S2=D12)
+.def resultado = r20   ;Resultado F y Banderas
+.def temp = r21        ;Registro auxiliar para banderas
+.def lectura = r22     ;Registro auxiliar de lectura
 
 .org 0x0000
 rjmp setup
 
-;Configuracion de puertos 
+;Configuración de Puertos
 setup:
     clr temp
-    out DDRB, temp        ;Puerto B: Entradas (PB0-PB3 = A)
+    out DDRB, temp        ;Puerto B: Entradas (D8-D11 = A)
     out DDRC, temp        ;Puerto C: Entradas (A0-A3 = B)
     
     ser temp
-    out DDRD, temp        ;Puerto D: Salidas (Resultado F)
+    out DDRD, temp        ;Puerto D: Salidas (D0-D3 = F)
 
 ;Bucle Principal (Lectura)
 loop:
-;Leer operador A
+    ;Leer Operando A
     in numA, PINB
     andi numA, 0x0F
 
-;Leer operador B
+    ;Leer Operando B (PC0-PC3 / A0-A3)
     in numB, PINC
-    andi numA, 0x0F
+    andi numB, 0x0F
 
-;Leer selector
+    ;Leer Selector (PC4=S0, PC5=S1, PB4=S2)
     in temp, PINC
     lsr temp
     lsr temp
@@ -42,9 +42,9 @@ loop:
     sbrc lectura, 4       ;Si D12 (PB4) es 1
     sbr temp, 0x04        ;Activa el bit S2
     
-    mov selector, temp   ;Selector completo (0 a 7)
+    mov selector, temp    ;Selector completo (0 a 7)
 
-;Enrutador del Selector
+;3. Decodificador
     cpi selector, 0
     breq op_clear
     cpi selector, 1
@@ -63,66 +63,68 @@ loop:
     breq op_inc
     rjmp loop
 
-;Operaciones ALU
+;4. Operaciones ALU
 op_clear:
-    clr resultado         ;Borra el valor de resultado dejando 0
+    clr resultado
     rjmp evaluar_flags
 
 op_sub:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    sub resultado, numB  ;Resta el valor de resultado - numB guardando el resultado, en resultado
+    mov resultado, numA
+    sub resultado, numB
     rjmp evaluar_flags
 
 op_add:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    add resultado, numB  ;Suma el valor de resultado + numB guardando el resultado, en resultado
+    mov resultado, numA
+    add resultado, numB
     rjmp evaluar_flags
 
 op_xor:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    eor resultado, numB  ;resultado xor numB guardando el resultado, en resultado
+    mov resultado, numA
+    eor resultado, numB
     rjmp evaluar_flags
 
 op_and:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    and resultado, numB  ;resultado and numB guardando el resultado, en resultado
+    mov resultado, numA
+    and resultado, numB
     rjmp evaluar_flags
 
 op_or:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    or resultado, numB   ;resultado or numB guardando el resultado, en resultado
+    mov resultado, numA
+    or resultado, numB
     rjmp evaluar_flags
 
 op_shl:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    lsl resultado        ;resultado es desplazado hacia la derecha
+    mov resultado, numA
+    lsl resultado
     rjmp evaluar_flags
 
 op_inc:
-    mov resultado, numA  ;Mueve el valor de numA hacia resultado
-    subi resultado, -1   ;suma 1 al valor de resultado
+    mov resultado, numA
+    subi resultado, -1
     rjmp evaluar_flags
 
-;Manejo de Salidas y Banderas
-evaluar_flags: 
-    clr temp
+;5. Manejo de Salidas y Banderas (Puerto D)
+evaluar_flags:
+    clr temp              ;Limpia el registro auxiliar de banderas
 
-;Evaluar Signo
-    sbrc resltado, 7
-    sbr temp,(1<<6)   ;Activa D6 si es negativo
+    ;1. Evaluar Signo REAL (Bit 7 del resultado de 8 bits)
+    sbrc resultado, 7
+    sbr temp, (1<<6)      ;Activa D6 (Signo) SOLO si el resultado es negativo
 
-;Evaluar CARRY
+    ;2. Evaluar Carry (Bit 4 del resultado de 8 bits -> D4)
     sbrc resultado, 4
-    sbr temp, (1<<4)   ;Activa D4
+    sbr temp, (1<<4)      ;Activa D4 (Carry)
 
-;Recorta resultado a 4 bits para los LEDs de salida
-    brn no_es_cero
-    sbr temp, (1<<5)    ;Activa D5
+    ;3. Recortar resultado a 4 bits para los LEDs de salida (D0-D3)
+    andi resultado, 0x0F
 
+    ;4. Evaluar Cero (sobre los 4 bits del resultado -> D5)
+    brne no_es_cero
+    sbr temp, (1<<5)      ; Activa D5 (Cero)
 no_es_cero:
-    ;unir resultados (D0-D3) y flags (D4-D6) en el puerto D
+
+    ;5. Unir Resultado (D0-D3) y Banderas (D4-D6) en el Puerto D
     or resultado, temp
     out PORTD, resultado
 
     rjmp loop
-
