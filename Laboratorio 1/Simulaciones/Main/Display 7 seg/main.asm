@@ -1,0 +1,170 @@
+.include "m328pdef.inc"
+.org 0x00 
+
+    rjmp inicio 
+.def contador = r16      ;Guardamos el numero actual de 0 a 9
+.def botones = r17       ;Almacena la lectrua del puerto de botones
+.def display = r18       ;Guarda la combinacion de pines
+.def temp = r19          ;Registro temporal para calculo 
+.def temp2 = r20         ;Segundo registro temporal 
+
+inicio:
+    ldi temp, high(RAMEND)     ;inicializamos el stack pointer 
+    out SPH, temp              
+
+    ldi temp, low(RAMEND)      ;Para que RCALL y RET sepan a donde regresar 
+    out SPL, temp
+
+    ldi display, 0b01111111
+    out DDRD, display          ;Asignamos los pines de D0 hasta D6 como salidas 
+
+    ldi display, 0b00000000
+    out DDRB, display          ;Asignamos los pines de B0 hasta B6 como entradas
+
+    clr contador               ;Ponemos el contador en cero  
+
+loop:
+    in botones, PINB           ;Leemos el estado de los pines del puerto B
+
+    sbrc botones, 0            ;Si el bit 0 es 0 (boton suleto), salta a la siguiente linea
+    rjmp subir                 ;Si el bit 0 es 1 (boton presionado), salta a subir
+
+    sbrc botones, 1            ;Lo mismo que en la liena 29, verifica el boton bajar
+    rjmp bajar                 ;Si es presionado salta a bajar
+
+    sbrc botones, 2            ;Verificamos el boton de reset
+    rjmp reset                 ;Si es presionado saltamos a reset
+
+    rjmp mostrar               ;Si ningun boton es presionado solo muestra el numero en el que está
+
+subir:
+    rcall debounce             ;LLamamos al antirebote del boton 
+
+    inc contador               ;Sumamos uno
+    cpi contador, 10           ;Comparamos el valor de contador con 10
+    brlo esperar_liberacion 
+
+    clr contador               ;Vuelve a 0 para reincicar el ciclo
+    rjmp esperar_liberacion 
+
+bajar: 
+    rcall debounce             ;Llamamos al antirrebote del boton 
+
+    tst contador               ;Evalua a contador para verificar si es 0 
+    brne bajar2                ;Si contador no es 0 pasa a bajar2
+ 
+    ldi contador, 9            ;Si el contador si es igaul a 0, se le asigna el num 9
+    rjmp esperar_liberacion  
+
+bajar2:
+    dec contador               ;Resta uno al valor de contador 
+    rjmp esperar_liberacion    ;Espera la liberacion 
+
+reset:
+    rcall debounce             ;LLamaos al antirrebote 
+
+    clr contador               ;Limpiamos el registro colocando un 0
+    rjmp esperar_liberacion    ;Esperamos la liberacion
+
+esperar_liberacion:
+    rcall mostrar_numero      ;Dibuja el nuevo numero en el display 
+
+espera:
+    in botones, PINB          ;Lee los botones 
+    andi botones, 0b00000111  ;Aislamos los pines 0, 1 y 2 para no tener valores basura 
+    brne espera             ;Mientras la lectura no sea 0 ( osea mantener presionado el boton) se quede atrapado en este bucle 
+    rcall debounce            ;Espera 10ms a que la señal se estabilice 
+    rjmp loop                 ;Regresa al bucle principal 
+
+debounce: 
+    ldi temp, 200          ;Cargamos el numero 200 en temp
+
+debounce1:
+    ldi temp2, 255        ;Cargamos el numero 255 en temp2
+
+debounce2:
+    dec temp2             ;Resta 1 al valor de temp2
+    brne debounce2        ;Si temp2 no ha llegado a 0 regresa a debounce2
+
+    dec temp              ;Resta uno al contador externo 
+    brne debounce1         ;Si temp aun no es cero, regresa a debounce1(recarga temp2 con 255
+                          ;y repite todo el bucle interno otra vez)
+    ret                   ;Cuando ambos contadores llegan a 0 termina el tiempo de espera y vuelve a la 
+                          ;intruccion siguiente donde fue llamado (RCALL)
+
+mostrar:
+    rcall mostrar_numero  ;Llamada a subrutina  
+    rjmp loop             ;Devuelve la ejecucion al inicio 
+
+mostrar_numero:
+    cpi contador, 0     ;El contador vale 0?
+    breq n0             ;Si sí salta a n0
+    cpi contador, 1     ;El contador vale 1?
+    breq n1             ;Salta a n1
+    cpi contador, 2
+    breq n2
+    cpi contador, 3
+    breq n3
+    cpi contador, 4
+    breq n4
+    cpi contador, 5
+    breq n5
+    cpi contador, 6
+    breq n6
+    cpi contador, 7
+    breq n7
+    cpi contador, 8
+    breq n8
+    cpi contador, 9
+    breq n9
+    ret
+
+n0:
+   ldi display, 0b00111111 ;Enciende los segmentos a, b, c, d, e y f formando el 0
+   out PORTD, display       ;Envia los bits a los pines fisicos
+   ret                     ;Regresa a la subrutina 
+
+n1:
+   ldi display, 0b00000110
+   out PORTD, display
+   ret
+
+n2:
+   ldi display, 0b01011011
+   out PORTD, display
+   ret
+
+n3:  
+   ldi display, 0b01001111
+   out PORTD, display
+   ret
+
+n4:
+   ldi display, 0b01100110
+   out PORTD, display
+   ret
+
+n5:
+   ldi display, 0b01101101
+   out PORTD, display
+   ret
+
+n6:
+   ldi display, 0b01111101
+   out PORTD, display 
+   ret
+
+n7:
+   ldi display, 0b00000111
+   out PORTD, display
+   ret
+
+n8:
+   ldi display, 0b01111111
+   out PORTD, display
+   ret
+
+n9: 
+   ldi display, 0b01101111
+   out PORTD, display
+   ret
