@@ -1,1 +1,355 @@
+.include "m328pdef.inc"
+
+.equ TIEMPO_CAMBIO_MS  = 750      ;tiempo visible de cada dibujo
+.equ INTENSIDAD_MATRIZ = 3        ;rango MAX7219: 0..15
+
+;Registros del MAX7219.
+.equ MAX_DECODE_MODE  = 0x09
+.equ MAX_INTENSITY    = 0x0A
+.equ MAX_SCAN_LIMIT   = 0x0B
+.equ MAX_SHUTDOWN     = 0x0C
+.equ MAX_DISPLAY_TEST = 0x0F
+
+.dseg
+par_actual:         .byte 1       ;0 = caras, 1 = corazon/:3, 2 = estrella/XD
+cuadro_actual:      .byte 1       ;0 = primer dibujo, 1 = segundo dibujo
+tiempo_cambio_L:    .byte 1       ;contador de animacion de 16 bits
+tiempo_cambio_H:    .byte 1
+actualizar_matriz:  .byte 1       ;1 = enviar el nuevo dibujo al MAX7219
+
+.cseg
+
+;Vectores
+.org 0x0000
+    rjmp RESET
+
+.org INT0addr
+    rjmp ISR_INT0
+
+.org INT1addr
+    rjmp ISR_INT1
+
+.org OC0Aaddr
+    rjmp ISR_TIMER0_COMPA
+
+.org INT_VECTORS_SIZE
+
+;Inicializacion
+RESET:
+    cli
+
+    ;Inicializar Stack Pointer
+    ldi r16, high(RAMEND)
+    out SPH, r16
+    ldi r16, low(RAMEND)
+    out SPL, r16
+
+    ;PB2 = CS, PB3 = MOSI/DIN y PB5 = SCK/CLK como salidas
+    ldi r16, (1<<DDB2) | (1<<DDB3) | (1<<DDB5)
+    out DDRB, r16
+
+    ;CS inactivo en 1; reloj y datos inicialmente en 0
+    ldi r16, (1<<PB2)
+    out PORTB, r16
+
+    ;PD2/INT0 y PD3/INT1 como entradas con pull-up interno
+    clr r16
+    out DDRD, r16
+    ldi r16, (1<<PD2) | (1<<PD3)
+    out PORTD, r16
+
+    ;Variables iniciales: par de caras, primer cuadro
+    clr r16
+    sts par_actual, r16
+    sts cuadro_actual, r16
+    ldi r16, low(TIEMPO_CAMBIO_MS)
+    sts tiempo_cambio_L, r16
+    ldi r16, high(TIEMPO_CAMBIO_MS)
+    sts tiempo_cambio_H, r16
+    ldi r16, 1
+    sts actualizar_matriz, r16
+
+    ; SPI maestro, modo 0, MSB primero, F_CPU/16 = 1 MHz
+    ldi r16, (1<<SPE) | (1<<MSTR) | (1<<SPR0)
+    out SPCR, r16
+    clr r16
+    out SPSR, r16
+
+    rcall INICIALIZAR_MAX7219
+
+    ;INT0 e INT1 por flanco de bajada
+    ldi r16, (1<<ISC01) | (1<<ISC11)
+    sts EICRA, r16
+    ldi r16, (1<<INTF0) | (1<<INTF1)
+    out EIFR, r16
+    ldi r16, (1<<INT0) | (1<<INT1)
+    out EIMSK, r16
+
+    ;Timer0 CTC: 16 MHz / (64 * (249+1)) = 1000 Hz = 1 ms
+    ldi r16, (1<<WGM01)
+    out TCCR0A, r16
+    ldi r16, 249
+    out OCR0A, r16
+    clr r16
+    out TCNT0, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    ldi r16, (1<<OCIE0A)
+    sts TIMSK0, r16
+    ldi r16, (1<<CS01) | (1<<CS00)
+    out TCCR0B, r16
+
+    sei
+
+;El programa principal solo actualiza la matriz cuando cambia el emoji
+PRINCIPAL:
+    lds r16, actualizar_matriz
+    tst r16
+    breq PRINCIPAL
+
+    clr r16
+    sts actualizar_matriz, r16
+    rcall MOSTRAR_EMOJI
+    rjmp PRINCIPAL
+
+;Boton INT0
+;Avanza circularmente: caras -> corazon/:3 -> asterisco/XD -> caras
+ISR_INT0:
+    push r16
+    in   r16, SREG
+    push r16
+    push r17
+
+    lds  r17, par_actual
+    inc  r17
+    cpi  r17, 3
+    brlo GUARDAR_PAR_INT0
+    clr  r17
+
+GUARDAR_PAR_INT0:
+    sts  par_actual, r17
+    clr  r17
+    sts  cuadro_actual, r17
+    ldi  r17, low(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_L, r17
+    ldi  r17, high(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_H, r17
+    ldi  r17, 1
+    sts  actualizar_matriz, r17
+
+FIN_INT0:
+    pop  r17
+    pop  r16
+    out  SREG, r16
+    pop  r16
+    reti
+
+;Boton INT1
+;Retrocede circularmente: caras -> asterisco/XD -> corazon/:3 -> caras
+ISR_INT1:
+    push r16
+    in   r16, SREG
+    push r16
+    push r17
+
+    lds  r17, par_actual
+    tst  r17
+    breq ENVOLVER_PAR_INT1
+    dec  r17
+    rjmp GUARDAR_PAR_INT1
+
+ENVOLVER_PAR_INT1:
+    ldi  r17, 2
+
+GUARDAR_PAR_INT1:
+    sts  par_actual, r17
+    clr  r17
+    sts  cuadro_actual, r17
+    ldi  r17, low(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_L, r17
+    ldi  r17, high(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_H, r17
+    ldi  r17, 1
+    sts  actualizar_matriz, r17
+
+FIN_INT1:
+    pop  r17
+    pop  r16
+    out  SREG, r16
+    pop  r16
+    reti
+
+;Timer0: 1 ms
+;Controla el cambio automatico entre los dos dibujos del par activo
+ISR_TIMER0_COMPA:
+    push r16
+    in   r16, SREG
+    push r16
+    push r17
+
+ACTUALIZAR_ANIMACION:
+    ;Cuenta regresiva de 16 bits, un decremento por milisegundo
+    lds  r16, tiempo_cambio_L
+    lds  r17, tiempo_cambio_H
+    subi r16, 1
+    sbci r17, 0
+    sts  tiempo_cambio_L, r16
+    sts  tiempo_cambio_H, r17
+
+    ;Si aun no llego a cero, conservar el dibujo actual
+    tst  r16
+    brne FIN_TIMER0
+    tst  r17
+    brne FIN_TIMER0
+
+    ;Alternar cuadro 0 <-> 1 y pedir una actualizacion del MAX7219
+    lds  r16, cuadro_actual
+    ldi  r17, 1
+    eor  r16, r17
+    sts  cuadro_actual, r16
+    sts  actualizar_matriz, r17
+
+    ;Recargar el tiempo para el proximo cambio
+    ldi  r16, low(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_L, r16
+    ldi  r16, high(TIEMPO_CAMBIO_MS)
+    sts  tiempo_cambio_H, r16
+
+FIN_TIMER0:
+    pop  r17
+    pop  r16
+    out  SREG, r16
+    pop  r16
+    reti
+
+;Configura el MAX7219 para una matriz 8x8
+INICIALIZAR_MAX7219:
+    ;Desactivar prueba de display
+    ldi r16, MAX_DISPLAY_TEST
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ;Mantener apagado mientras se configura
+    ldi r16, MAX_SHUTDOWN
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ;Sin decodificacion: cada byte controla ocho LEDs
+    ldi r16, MAX_DECODE_MODE
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ;Habilitar las ocho filas/digitos
+    ldi r16, MAX_SCAN_LIMIT
+    ldi r17, 7
+    rcall MAX_ESCRIBIR
+
+    ;Brillo inicial
+    ldi r16, MAX_INTENSITY
+    ldi r17, INTENSIDAD_MATRIZ
+    rcall MAX_ESCRIBIR
+
+    ;Limpiar las ocho filas
+    ldi r19, 1
+    clr r17
+
+LIMPIAR_MAX7219:
+    mov r16, r19
+    rcall MAX_ESCRIBIR
+    inc r19
+    cpi r19, 9
+    brlo LIMPIAR_MAX7219
+
+    ;Encender el funcionamiento normal
+    ldi r16, MAX_SHUTDOWN
+    ldi r17, 1
+    rcall MAX_ESCRIBIR
+    ret
+
+;Envia r16=registro y r17=dato. CS debe bajar durante los 16 bits
+MAX_ESCRIBIR:
+    cbi PORTB, PB2
+    rcall SPI_ENVIAR
+    mov r16, r17
+    rcall SPI_ENVIAR
+    sbi PORTB, PB2
+    ret
+
+;Envia por SPI el byte contenido en r16. Modifica r18
+SPI_ENVIAR:
+    out SPDR, r16
+
+ESPERAR_SPI:
+    in   r18, SPSR
+    sbrs r18, SPIF
+    rjmp ESPERAR_SPI
+    in   r18, SPDR                 ;leer SPDR completa el borrado de SPIF
+    ret
+
+;Envia al MAX7219 los ocho bytes del emoji seleccionado
+MOSTRAR_EMOJI:
+    push r16
+    push r17
+    push r18
+    push r19
+    push r30
+    push r31
+
+    ldi  r30, low(TABLA_EMOJIS*2)
+    ldi  r31, high(TABLA_EMOJIS*2)
+    clr  r18
+
+    ;Cada par ocupa 16 bytes. Para 0, 1 o 2, SWAP produce 0, 16 o 32
+    lds  r16, par_actual
+    swap r16
+    andi r16, 0xF0
+    add  r30, r16
+    adc  r31, r18
+
+    ;El segundo cuadro del par comienza 8 bytes despues
+    lds  r16, cuadro_actual
+    tst  r16
+    breq ENVIAR_FILAS
+    adiw r30, 8
+
+ENVIAR_FILAS:
+    ldi  r19, 1                    ;registros DIGIT0..DIGIT7 = 1..8
+
+BUCLE_FILAS:
+    lpm  r17, Z+
+    mov  r16, r19
+    rcall MAX_ESCRIBIR
+    inc  r19
+    cpi  r19, 9
+    brlo BUCLE_FILAS
+
+    pop  r31
+    pop  r30
+    pop  r19
+    pop  r18
+    pop  r17
+    pop  r16
+    ret
+
+;Cada grupo contiene ocho filas. Bit 7 = izquierda; bit 0 = derecha
+TABLA_EMOJIS:
+
+;Par 1: carita sonriendo
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+;Par 1: carita guiñando
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+;Par 2: corazon
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+;Par 2: :3
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+;Par 3: estrella
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+;Par 3: XD
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
+    .db 0b00000000, 0b00000000, 0b00000000, 0b00000000
 
