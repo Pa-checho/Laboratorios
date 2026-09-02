@@ -119,41 +119,61 @@ esperar_rx:
     out PORTB, r16
     out PORTC, r16
 
+    cpi r17, 0
+    breq led0
+    cpi r17, 1
+    breq led1
+    cpi r17, 2
+    breq led2
+    cpi r17, 3
+    breq led3
+    cpi r17, 4
+    breq led4
+    cpi r17, 5
+    breq led5
     cpi r17, 6
-    brsh puerto_c
+    breq led6
+    cpi r17, 7
+    breq led
 
-    ldi r16 0b00000001
-    mov r19, r17
+    rjmp esperar_rx
 
-desplazar_b:
-    tst r19
-    breq mostrar_b
-
-    lsl r16
-    dec r19
-    rjmp desplazar_b
-
-mostrar_b:
+led0:
+    ldi r16, 0b00000001
     out PORTB, r16
     rjmp esperar_rx
 
-puerto_c:
-    ; Restar 6 para obtener la posicion
-    ; dentro de PORTC
-    subi r17, 6
+led1:
+    ldi r16, 0b00000010
+    out PORTB, r16
+    rjmp esperar_rx
 
-    ; Comenzar en PC0
+led2:
+    ldi r16, 0b00000100
+    out PORTB, r16
+    rjmp esperar_rx
+
+led3:
+    ldi r16, 0b00001000
+    out PORTB, r16
+    rjmp esperar_rx
+
+led4:
+    ldi r16, 0b00010000
+    out PORTB, r16
+    rjmp esperar_rx
+
+led5:
+    ldi r16, 0b00100000
+    out PORTB, r16
+    rjmp esperar_rx
+
+led6:
     ldi r16, 0b00000001
-
-desplazar_c:
-    tst r17
-    breq mostrar_c
-
-    lsl r16
-    dec r17
-    rjmp desplazar_c
-
-mostrar_c:
     out PORTC, r16
+    rjmp esperar_rx
 
+led7:
+    ldi r16, 0b00000010
+    out PORTC, r16
     rjmp esperar_rx
