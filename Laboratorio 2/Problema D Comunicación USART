@@ -119,22 +119,41 @@ esperar_rx:
     out PORTB, r16
     out PORTC, r16
 
-    ; Preparar primer LED
-    ldi r16, 0b00000001
+    cpi r17, 6
+    brsh puerto_c
 
-    ; Desplazar el bit según el valor recibido
+    ldi r16 0b00000001
     mov r19, r17
 
-desplazar:
+desplazar_b:
     tst r19
-    breq mostrar
+    breq mostrar_b
 
     lsl r16
     dec r19
-    rjmp desplazar
+    rjmp desplazar_b
 
-mostrar:
-    ; Mostrar resultado en PORTB
+mostrar_b:
     out PORTB, r16
+    rjmp esperar_rx
+
+puerto_c:
+    ; Restar 6 para obtener la posicion
+    ; dentro de PORTC
+    subi r17, 6
+
+    ; Comenzar en PC0
+    ldi r16, 0b00000001
+
+desplazar_c:
+    tst r17
+    breq mostrar_c
+
+    lsl r16
+    dec r17
+    rjmp desplazar_c
+
+mostrar_c:
+    out PORTC, r16
 
     rjmp esperar_rx
