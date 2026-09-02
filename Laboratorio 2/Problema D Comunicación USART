@@ -36,12 +36,17 @@ bucle:
     com r17
     andi r17, 0b00000111
 
-esperar:
-    lds r18, UCSR0A
-    sbrs r18, UDRE0
-    rjmp esperar
-
-    ;Transmitir valor
-    sts UDR0, r17
+    :transmitir
+    rcall transmitir
 
     rjmp bucle
+
+transmitir:
+    ;Esperar a que USART este disponible
+esperar_tx:
+    lds r18, UCSR0A
+    sbrs r18, UDRE0
+    rjmp esperar_tx
+
+    sts UDR0, r17
+    ret
