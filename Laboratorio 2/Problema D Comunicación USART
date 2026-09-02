@@ -32,6 +32,10 @@ bucle:
     in r17, PINC
     andi r17, 0b00000111
 
+    ;Invertir logica de los switch
+    com r17
+    andi r17, 0b00000111
+
 esperar:
     lds r18, UCSR0A
     sbrs r18, UDRE0
