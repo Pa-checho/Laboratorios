@@ -1,13 +1,11 @@
-; ETAPA 1: CONTROL BASICO DE PUERTA
-; ATmega328P, 16 MHz
-; D2=abrir, D3=cerrar, D8=abierta, D9=cerrada
-
+; ETAPA 2: SE AGREGAN LOS LED DEL MOTOR Y MOVIMIENTO DE 5 S
+; D8=abierta, D9=cerrada, D10=motor abriendo, D11=motor cerrando
 .include "m328pdef.inc"
-.equ ORDEN_NINGUNA=0
-.equ ORDEN_ABRIR=1
-.equ ORDEN_CERRAR=2
-.equ TIEMPO_L=0xB8
-.equ TIEMPO_H=0x0B
+.equ NINGUNA=0
+.equ ABRIR=1
+.equ CERRAR=2
+.equ T_L=0x88                 ; 5000 = 0x1388
+.equ T_H=0x13
 .dseg
 contador_L:.byte 1
 contador_H:.byte 1
@@ -31,10 +29,10 @@ RESET:
  sts contador_L,r16
  sts contador_H,r16
  sts orden,r16
- ldi r16,(1<<DDB0)|(1<<DDB1)
+ ldi r16,0b00001111          ; PB0..PB3 son salidas
  out DDRB,r16
  cbi PORTB,PORTB0
- sbi PORTB,PORTB1
+ sbi PORTB,PORTB1            ; al iniciar se considera cerrada
  cbi DDRD,DDD2
  cbi DDRD,DDD3
  sbi PORTD,PORTD2
@@ -43,7 +41,6 @@ RESET:
  sts EICRA,r16
  ldi r16,(1<<INT0)|(1<<INT1)
  out EIMSK,r16
- ; Timer0 CTC produce una interrupcion cada 1 ms.
  ldi r16,(1<<WGM01)
  out TCCR0A,r16
  ldi r16,249
@@ -55,17 +52,34 @@ RESET:
  sei
 PRINCIPAL:
  rjmp PRINCIPAL
+
+INICIAR_APERTURA:
+ cbi PORTB,PORTB0
+ cbi PORTB,PORTB1
+ sbi PORTB,PORTB2            ; encender motor abriendo
+ cbi PORTB,PORTB3
+ ret
+INICIAR_CIERRE:
+ cbi PORTB,PORTB0
+ cbi PORTB,PORTB1
+ cbi PORTB,PORTB2
+ sbi PORTB,PORTB3            ; encender motor cerrando
+ ret
+DETENER:
+ cbi PORTB,PORTB2
+ cbi PORTB,PORTB3
+ ret
+
 ISR_ABRIR:
  push r16
  in r16,SREG
  push r16
- cbi PORTB,PORTB0
- cbi PORTB,PORTB1
- ldi r16,ORDEN_ABRIR
+ rcall INICIAR_APERTURA
+ ldi r16,ABRIR
  sts orden,r16
- ldi r16,TIEMPO_L
+ ldi r16,T_L
  sts contador_L,r16
- ldi r16,TIEMPO_H
+ ldi r16,T_H
  sts contador_H,r16
  pop r16
  out SREG,r16
@@ -75,18 +89,18 @@ ISR_CERRAR:
  push r16
  in r16,SREG
  push r16
- cbi PORTB,PORTB0
- cbi PORTB,PORTB1
- ldi r16,ORDEN_CERRAR
+ rcall INICIAR_CIERRE
+ ldi r16,CERRAR
  sts orden,r16
- ldi r16,TIEMPO_L
+ ldi r16,T_L
  sts contador_L,r16
- ldi r16,TIEMPO_H
+ ldi r16,T_H
  sts contador_H,r16
  pop r16
  out SREG,r16
  pop r16
  reti
+
 ISR_TIMER0:
  push r16
  push r17
@@ -107,20 +121,21 @@ RESTAR:
  brne FIN_TIMER
  tst r17
  brne FIN_TIMER
+ rcall DETENER
  lds r16,orden
- cpi r16,ORDEN_ABRIR
- breq MOSTRAR_ABIERTA
- cpi r16,ORDEN_CERRAR
- breq MOSTRAR_CERRADA
- rjmp BORRAR_ORDEN
-MOSTRAR_ABIERTA:
+ cpi r16,ABRIR
+ breq TERMINAR_ABRIR
+ cpi r16,CERRAR
+ breq TERMINAR_CERRAR
+ rjmp BORRAR
+TERMINAR_ABRIR:
  sbi PORTB,PORTB0
  cbi PORTB,PORTB1
- rjmp BORRAR_ORDEN
-MOSTRAR_CERRADA:
+ rjmp BORRAR
+TERMINAR_CERRAR:
  cbi PORTB,PORTB0
  sbi PORTB,PORTB1
-BORRAR_ORDEN:
+BORRAR:
  clr r16
  sts orden,r16
 FIN_TIMER:
