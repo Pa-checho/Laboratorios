@@ -1,4 +1,48 @@
 
+;===========================================================
+; GUIA RAPIDA DE INSTRUCCIONES AVR UTILIZADAS
+;
+; LDI  Rd,valor  : carga un valor constante en un registro.
+; LDS  Rd,dato   : lee una variable de la memoria SRAM.
+; STS  dato,Rr   : guarda un registro en la memoria SRAM.
+; IN   Rd,puerto : lee un registro de entrada/salida.
+; OUT  puerto,Rr : escribe un registro de entrada/salida.
+; SBI  puerto,bit: coloca en 1 un bit de un puerto.
+; CBI  puerto,bit: coloca en 0 un bit de un puerto.
+; CLI            : deshabilita temporalmente las interrupciones.
+; SEI            : habilita globalmente las interrupciones.
+; TST  Rd        : comprueba si un registro contiene cero.
+; CPI  Rd,valor  : compara un registro con un valor constante.
+; BREQ etiqueta  : salta si la comparacion anterior fue igual.
+; BRNE etiqueta  : salta si la comparacion anterior fue diferente.
+; RJMP etiqueta  : realiza un salto dentro del programa.
+; RCALL etiqueta : llama una subrutina y guarda el retorno.
+; RET            : regresa de una subrutina.
+; RETI           : regresa de una rutina de interrupcion.
+; PUSH registro  : guarda temporalmente un registro en la pila.
+; POP registro   : recupera un registro guardado en la pila.
+; ORI  Rd,valor  : activa bits sin modificar los demas bits.
+; ANDI Rd,valor  : conserva solamente los bits indicados.
+; LPM  Rd,Z+     : lee un byte de Flash y avanza el puntero Z.
+;
+; CALCULO DEL TIMER0
+; -----------------
+; Frecuencia del microcontrolador: F_CPU = 16 000 000 Hz.
+; Se selecciona un prescaler de 64:
+;     16 000 000 / 64 = 250 000 Hz
+; Cada cuenta del Timer0 dura entonces:
+;     1 / 250 000 = 4 microsegundos
+; Para obtener una interrupcion cada 1 milisegundo se necesitan:
+;     1 ms / 4 us = 250 cuentas
+; En modo CTC el contador incluye el cero, por eso:
+;     OCR0A = 250 - 1 = 249
+; Resultado:
+;     16 000 000 / 64 / (249 + 1) = 1000 Hz
+; Esto equivale a una interrupcion cada 1 ms. Para medir los
+; 5 segundos del movimiento se cuentan 5000 interrupciones:
+;     5000 * 1 ms = 5000 ms = 5 segundos
+;===========================================================
+
 .include "m328pdef.inc"
 
 .equ ORDEN_NINGUNA = 0
