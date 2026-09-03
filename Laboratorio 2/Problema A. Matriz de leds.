@@ -7,10 +7,19 @@
 .equ MAX_SHUTDOWN      = 0x0C
 .equ MAX_DISPLAY_TEST  = 0x0F
 
+.dseg
+imagen_actual: .byte 1
+actualizar_matriz: .byte 1 
+
+
+
 .cseg
 .org 0x0000
     rjmp RESET
-
+.org INT0addr
+    rjmp ISR_INT0
+.org INT1addr
+    rjmp ISR_INT1
 .org INT_VECTORS_SIZE
 
 RESET:
@@ -22,13 +31,25 @@ RESET:
     ldi r16, low(RAMEND)
     out SPL, r16
 
-    ; PB2=CS, PB3=MOSI/DIN y PB5=SCK/CLK como salidas.
+    ; SPI hacia MAX7219
     ldi r16, (1<<DDB2) | (1<<DDB3) | (1<<DDB5)
     out DDRB, r16
-
-    ; CS inactivo en uno.
     ldi r16, (1<<PB2)
     out PORTB, r16
+
+  
+
+    ; D2 e D3 como entradas con pull-up interno.
+    clr r16
+    out DDRD, r16
+    ldi r16, (1<<PD2) | (1<<PD3)
+    out PORTD, r16
+
+
+    clr r16
+    sts imagen_actual, r16
+    ldi r16, 1
+    sts actualizar_matriz, r16
 
     ; SPI maestro, modo 0, MSB primero, F_CPU/16 = 1 MHz.
     ldi r16, (1<<SPE) | (1<<MSTR) | (1<<SPR0)
@@ -36,11 +57,74 @@ RESET:
     clr r16
     out SPSR, r16
 
+
+
+
+
+    ; CS inactivo en uno.
+    ldi r16, (1<<PB2)
+    out PORTB, r16
+
+
+
     rcall INICIALIZAR_MAX7219
-    rcall MOSTRAR_SONRISA
 
 PRINCIPAL:
+    lds r16, actualizar_matriz
+    tst r16
+    breq PRINCIPAL
+    clr r16
+    sts actualizar_matriz, r16
+    rcall MOSTRAR_IMAGEN
     rjmp PRINCIPAL
+
+; D2: 0->1->2->3->4->5->0.
+ISR_INT0:
+    push r16
+    in   r16, SREG
+    push r16
+    push r17
+
+    lds r17, imagen_actual
+    inc r17
+    cpi r17, 6
+    brlo INT0_GUARDAR
+    clr r17
+
+INT0_GUARDAR:
+    sts imagen_actual, r17
+    ldi r17, 1
+    sts actualizar_matriz, r17
+    rjmp ISR_FIN
+
+; D3: recorrido inverso.
+ISR_INT1:
+    push r16
+    in   r16, SREG
+    push r16
+    push r17
+
+    lds r17, imagen_actual
+    tst r17
+    breq INT1_ENVOLVER
+    dec r17
+    rjmp INT1_GUARDAR
+
+INT1_ENVOLVER:
+    ldi r17, 5
+
+INT1_GUARDAR:
+    sts imagen_actual, r17
+    ldi r17, 1
+    sts actualizar_matriz, r17
+
+ISR_FIN:
+    pop r17
+    pop r16
+    out SREG, r16
+    pop r16
+    reti
+
 
 ; Configura el MAX7219 para controlar las ocho filas de la matriz.
 INICIALIZAR_MAX7219:
@@ -68,12 +152,12 @@ INICIALIZAR_MAX7219:
     ldi r19, 1
     clr r17
 
-LIMPIAR_FILAS:
+MAX_LIMPIAR:
     mov r16, r19
     rcall MAX_ESCRIBIR
     inc r19
     cpi r19, 9
-    brlo LIMPIAR_FILAS
+    brlo MAX_LIMPIAR
 
     ; Encender el MAX7219 en modo normal.
     ldi r16, MAX_SHUTDOWN
@@ -94,32 +178,69 @@ MAX_ESCRIBIR:
 SPI_ENVIAR:
     out SPDR, r16
 
-ESPERAR_SPI:
+SPI_ESPERAR:
     in   r18, SPSR
     sbrs r18, SPIF
-    rjmp ESPERAR_SPI
+    rjmp SPI_ESPERAR
     in   r18, SPDR
     ret
+MOSTRAR_IMAGEN:
+    push r16
+    push r17
+    push r18
+    push r19
+    push r30
+    push r31
 
-; Envia al MAX7219 las ocho filas de la carita.
-MOSTRAR_SONRISA:
-    ldi r30, low(SONRISA*2)
-    ldi r31, high(SONRISA*2)
+    ldi r30, low(TABLA_IMAGENES*2)
+    ldi r31, high(TABLA_IMAGENES*2)
+    clr r18
+
+    lds r16, imagen_actual
+    lsl r16
+    lsl r16
+    lsl r16
+    add r30, r16
+    adc r31, r18
+
     ldi r19, 1
-
-SONRISA_SIGUIENTE_FILA:
+MOSTRAR_FILA:
     lpm r17, Z+
     mov r16, r19
     rcall MAX_ESCRIBIR
     inc r19
     cpi r19, 9
-    brlo SONRISA_SIGUIENTE_FILA
+    brlo MOSTRAR_FILA
+
+    pop r31
+    pop r30
+    pop r19
+    pop r18
+    pop r17
+    pop r16
     ret
 
-; Ocho bytes, uno por cada fila de la matriz.
-SONRISA:
+TABLA_IMAGENES:
+
+; 0: carita sonriendo
     .db 0b00111100, 0b01000010, 0b10100101, 0b10000001
     .db 0b10100001, 0b10011101, 0b01000010, 0b00111100
+; 1: carita guinando.
+    .db 0b00111100,0b01000010,0b10100001,0b10001101
+    .db 0b10100001,0b10011101,0b01000010,0b00111100
+; 2: corazon.
+    .db 0b00000000,0b01100110,0b11111111,0b11111111
+    .db 0b01111110,0b00111100,0b00011000,0b00000000
+; 3: :3.
+    .db 0b00000000,0b00011100,0b01000010,0b00011100
+    .db 0b01000010,0b00011100,0b00000000,0b00000000
+; 4: estrella.
+    .db 0b00011000,0b00011000,0b00111100,0b11111111
+    .db 0b01111110,0b00111100,0b01100110,0b01000010
+; 5: XD.
+    .db 0b00000000,0b10101110,0b10101001,0b01001001
+    .db 0b10101001,0b10101110,0b00000000,0b00000000
+
 
 
 
