@@ -1,1 +1,125 @@
+.include "m328pdef.inc"
+
+.equ INTENSIDAD_MATRIZ = 3
+.equ MAX_DECODE_MODE   = 0x09
+.equ MAX_INTENSITY     = 0x0A
+.equ MAX_SCAN_LIMIT    = 0x0B
+.equ MAX_SHUTDOWN      = 0x0C
+.equ MAX_DISPLAY_TEST  = 0x0F
+
+.cseg
+.org 0x0000
+    rjmp RESET
+
+.org INT_VECTORS_SIZE
+
+RESET:
+    cli
+
+    ; Inicializar la pila para poder utilizar RCALL y RET.
+    ldi r16, high(RAMEND)
+    out SPH, r16
+    ldi r16, low(RAMEND)
+    out SPL, r16
+
+    ; PB2=CS, PB3=MOSI/DIN y PB5=SCK/CLK como salidas.
+    ldi r16, (1<<DDB2) | (1<<DDB3) | (1<<DDB5)
+    out DDRB, r16
+
+    ; CS inactivo en uno.
+    ldi r16, (1<<PB2)
+    out PORTB, r16
+
+    ; SPI maestro, modo 0, MSB primero, F_CPU/16 = 1 MHz.
+    ldi r16, (1<<SPE) | (1<<MSTR) | (1<<SPR0)
+    out SPCR, r16
+    clr r16
+    out SPSR, r16
+
+    rcall INICIALIZAR_MAX7219
+    rcall MOSTRAR_SONRISA
+
+PRINCIPAL:
+    rjmp PRINCIPAL
+
+; Configura el MAX7219 para controlar las ocho filas de la matriz.
+INICIALIZAR_MAX7219:
+    ldi r16, MAX_DISPLAY_TEST
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ldi r16, MAX_SHUTDOWN
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ldi r16, MAX_DECODE_MODE
+    clr r17
+    rcall MAX_ESCRIBIR
+
+    ldi r16, MAX_SCAN_LIMIT
+    ldi r17, 7
+    rcall MAX_ESCRIBIR
+
+    ldi r16, MAX_INTENSITY
+    ldi r17, INTENSIDAD_MATRIZ
+    rcall MAX_ESCRIBIR
+
+    ; Limpiar las ocho filas.
+    ldi r19, 1
+    clr r17
+
+LIMPIAR_FILAS:
+    mov r16, r19
+    rcall MAX_ESCRIBIR
+    inc r19
+    cpi r19, 9
+    brlo LIMPIAR_FILAS
+
+    ; Encender el MAX7219 en modo normal.
+    ldi r16, MAX_SHUTDOWN
+    ldi r17, 1
+    rcall MAX_ESCRIBIR
+    ret
+
+; Envia una trama de 16 bits: r16=direccion y r17=dato.
+MAX_ESCRIBIR:
+    cbi PORTB, PB2
+    rcall SPI_ENVIAR
+    mov r16, r17
+    rcall SPI_ENVIAR
+    sbi PORTB, PB2
+    ret
+
+; Envia por SPI el byte contenido en r16.
+SPI_ENVIAR:
+    out SPDR, r16
+
+ESPERAR_SPI:
+    in   r18, SPSR
+    sbrs r18, SPIF
+    rjmp ESPERAR_SPI
+    in   r18, SPDR
+    ret
+
+; Envia al MAX7219 las ocho filas de la carita.
+MOSTRAR_SONRISA:
+    ldi r30, low(SONRISA*2)
+    ldi r31, high(SONRISA*2)
+    ldi r19, 1
+
+SONRISA_SIGUIENTE_FILA:
+    lpm r17, Z+
+    mov r16, r19
+    rcall MAX_ESCRIBIR
+    inc r19
+    cpi r19, 9
+    brlo SONRISA_SIGUIENTE_FILA
+    ret
+
+; Ocho bytes, uno por cada fila de la matriz.
+SONRISA:
+    .db 0b00111100, 0b01000010, 0b10100101, 0b10000001
+    .db 0b10100001, 0b10011101, 0b01000010, 0b00111100
+
+
 
