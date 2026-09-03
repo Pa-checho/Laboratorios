@@ -1,6 +1,9 @@
 .include "m328pdef.inc"
 
+.equ VELOCIDAD_SCROLL_MS = 150
 .equ INTENSIDAD_MATRIZ = 3
+.equ MENSAJE_TOTAL_COLUMNAS = 148
+.equ MENSAJE_POSICIONES     = MENSAJE_TOTAL_COLUMNAS-7
 .equ MAX_DECODE_MODE   = 0x09
 .equ MAX_INTENSITY     = 0x0A
 .equ MAX_SCAN_LIMIT    = 0x0B
@@ -8,8 +11,11 @@
 .equ MAX_DISPLAY_TEST  = 0x0F
 
 .dseg
-imagen_actual: .byte 1
-actualizar_matriz: .byte 1 
+modo_actual:        .byte 1
+desplazamiento:     .byte 1
+tiempo_scroll_L:    .byte 1
+tiempo_scroll_H:    .byte 1
+actualizar_matriz:  .byte 1
 
 
 
@@ -20,6 +26,8 @@ actualizar_matriz: .byte 1
     rjmp ISR_INT0
 .org INT1addr
     rjmp ISR_INT1
+.org OC0Aaddr
+    rjmp ISR_TIMER0_COMPA
 .org INT_VECTORS_SIZE
 
 RESET:
@@ -47,7 +55,12 @@ RESET:
 
 
     clr r16
-    sts imagen_actual, r16
+    sts modo_actual, r16
+    sts desplazamiento, r16
+    ldi r16, low(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_L, r16
+    ldi r16, high(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_H, r16
     ldi r16, 1
     sts actualizar_matriz, r16
 
@@ -56,18 +69,32 @@ RESET:
     out SPCR, r16
     clr r16
     out SPSR, r16
-
-
-
-
-
-    ; CS inactivo en uno.
-    ldi r16, (1<<PB2)
-    out PORTB, r16
-
-
-
     rcall INICIALIZAR_MAX7219
+
+    ; Interrupciones externas por flanco de bajada.
+    ldi r16, (1<<ISC01) | (1<<ISC11)
+    sts EICRA, r16
+    ldi r16, (1<<INTF0) | (1<<INTF1)
+    out EIFR, r16
+    ldi r16, (1<<INT0) | (1<<INT1)
+    out EIMSK, r16
+
+    ; Timer0 CTC: 16 MHz/(64*(249+1)) = un tick cada 1 ms.
+    ldi r16, (1<<WGM01)
+    out TCCR0A, r16
+    ldi r16, 249
+    out OCR0A, r16
+    clr r16
+    out TCNT0, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    ldi r16, (1<<OCIE0A)
+    sts TIMSK0, r16
+    ldi r16, (1<<CS01) | (1<<CS00)
+    out TCCR0B, r16
+    sei
+
+
 
 PRINCIPAL:
     lds r16, actualizar_matriz
@@ -85,17 +112,15 @@ ISR_INT0:
     push r16
     push r17
 
-    lds r17, imagen_actual
+    lds r17, modo_actual
     inc r17
-    cpi r17, 6
+    cpi r17, 7
     brlo INT0_GUARDAR
     clr r17
 
 INT0_GUARDAR:
-    sts imagen_actual, r17
-    ldi r17, 1
-    sts actualizar_matriz, r17
-    rjmp ISR_FIN
+    sts modo_actual, r17
+    rjmp REINICIAR_SELECCION
 
 ; D3: recorrido inverso.
 ISR_INT1:
@@ -104,21 +129,70 @@ ISR_INT1:
     push r16
     push r17
 
-    lds r17, imagen_actual
+    lds r17, modo_actual
     tst r17
     breq INT1_ENVOLVER
     dec r17
     rjmp INT1_GUARDAR
 
 INT1_ENVOLVER:
-    ldi r17, 5
+    ldi r17, 6
 
 INT1_GUARDAR:
-    sts imagen_actual, r17
+    sts modo_actual, r17
+
+REINICIAR_SELECCION:
+    clr r17
+    sts desplazamiento, r17
+    ldi r17, low(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_L, r17
+    ldi r17, high(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_H, r17
     ldi r17, 1
     sts actualizar_matriz, r17
+    pop r17
+    pop r16
+    out SREG, r16
+    pop r16
+    reti
 
-ISR_FIN:
+; Cada 150 ticks de 1 ms, avanzar una columna si el modo es el mensaje.
+ISR_TIMER0_COMPA:
+    push r16
+    in r16, SREG
+    push r16
+    push r17
+
+    lds r16, modo_actual
+    tst r16
+    brne TIMER0_FIN
+
+    lds r16, tiempo_scroll_L
+    lds r17, tiempo_scroll_H
+    subi r16, 1
+    sbci r17, 0
+    sts tiempo_scroll_L, r16
+    sts tiempo_scroll_H, r17
+    tst r16
+    brne TIMER0_FIN
+    tst r17
+    brne TIMER0_FIN
+
+    lds r16, desplazamiento
+    inc r16
+    cpi r16, MENSAJE_POSICIONES
+    brlo TIMER0_GUARDAR
+    clr r16
+TIMER0_GUARDAR:
+    sts desplazamiento, r16
+    ldi r16, 1
+    sts actualizar_matriz, r16
+    ldi r16, low(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_L, r16
+    ldi r16, high(VELOCIDAD_SCROLL_MS)
+    sts tiempo_scroll_H, r16
+
+TIMER0_FIN:
     pop r17
     pop r16
     out SREG, r16
@@ -158,8 +232,6 @@ MAX_LIMPIAR:
     inc r19
     cpi r19, 9
     brlo MAX_LIMPIAR
-
-    ; Encender el MAX7219 en modo normal.
     ldi r16, MAX_SHUTDOWN
     ldi r17, 1
     rcall MAX_ESCRIBIR
@@ -184,6 +256,17 @@ SPI_ESPERAR:
     rjmp SPI_ESPERAR
     in   r18, SPDR
     ret
+
+MOSTRAR_SELECCION:
+    lds r16, modo_actual
+    tst r16
+    breq MOSTRAR_MENSAJE
+    rcall MOSTRAR_IMAGEN
+    ret
+MOSTRAR_MENSAJE:
+    rcall MOSTRAR_CUADRO_MENSAJE
+    ret
+
 MOSTRAR_IMAGEN:
     push r16
     push r17
@@ -204,16 +287,73 @@ MOSTRAR_IMAGEN:
     adc r31, r18
 
     ldi r19, 1
-MOSTRAR_FILA:
+IMAGEN_SIGUIENTE_FILA:
     lpm r17, Z+
     mov r16, r19
     rcall MAX_ESCRIBIR
     inc r19
     cpi r19, 9
-    brlo MOSTRAR_FILA
+    brlo IMAGEN_SIGUIENTE_FILA
 
     pop r31
     pop r30
+    pop r19
+    pop r18
+    pop r17
+    pop r16
+    ret
+MOSTRAR_CUADRO_MENSAJE:
+    push r16
+    push r17
+    push r18
+    push r19
+    push r20
+    push r21
+    push r22
+    push r23
+    push r24
+    push r25
+    push r30
+    push r31
+
+    ldi r19, 1
+    ldi r20, 0x01
+MENSAJE_FILAS:
+    ldi r30, low(MENSAJE_COLUMNAS*2)
+    ldi r31, high(MENSAJE_COLUMNAS*2)
+    lds r24, desplazamiento
+    clr r25
+    add r30, r24
+    adc r31, r25
+
+    clr r21
+    ldi r22, 8
+MENSAJE_COLUMNAS_VISIBLES:
+    lsl r21
+    lpm r23, Z+
+    and r23, r20
+    breq MENSAJE_LED_APAGADO
+    ori r21, 1
+MENSAJE_LED_APAGADO:
+    dec r22
+    brne MENSAJE_COLUMNAS_VISIBLES
+
+    mov r16, r19
+    mov r17, r21
+    rcall MAX_ESCRIBIR
+    inc r19
+    lsl r20
+    cpi r19, 9
+    brlo MENSAJE_FILAS
+
+    pop r31
+    pop r30
+    pop r25
+    pop r24
+    pop r23
+    pop r22
+    pop r21
+    pop r20
     pop r19
     pop r18
     pop r17
