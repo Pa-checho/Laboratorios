@@ -4,6 +4,7 @@
 .equ INTENSIDAD_MATRIZ = 3
 .equ MENSAJE_TOTAL_COLUMNAS = 148
 .equ MENSAJE_POSICIONES     = MENSAJE_TOTAL_COLUMNAS-7
+
 .equ MAX_DECODE_MODE   = 0x09
 .equ MAX_INTENSITY     = 0x0A
 .equ MAX_SCAN_LIMIT    = 0x0B
@@ -69,7 +70,9 @@ RESET:
     out SPCR, r16
     clr r16
     out SPSR, r16
+
     rcall INICIALIZAR_MAX7219
+    rcall INICIALIZAR_USART
 
     ; Interrupciones externas por flanco de bajada.
     ldi r16, (1<<ISC01) | (1<<ISC11)
@@ -94,9 +97,14 @@ RESET:
     out TCCR0B, r16
     sei
 
+    ldi r30, low(TEXTO_BIENVENIDA*2)
+    ldi r31, high(TEXTO_BIENVENIDA*2)
+    rcall USART_ENVIAR_CADENA
+    rcall USART_MOSTRAR_MENU
 
 
 PRINCIPAL:
+    rcall USART_REVISAR_ENTRADA
     lds r16, actualizar_matriz
     tst r16
     breq PRINCIPAL
@@ -123,6 +131,8 @@ INT0_GUARDAR:
     rjmp REINICIAR_SELECCION
 
 ; D3: recorrido inverso.
+
+
 ISR_INT1:
     push r16
     in   r16, SREG
@@ -173,6 +183,7 @@ ISR_TIMER0_COMPA:
     sbci r17, 0
     sts tiempo_scroll_L, r16
     sts tiempo_scroll_H, r17
+
     tst r16
     brne TIMER0_FIN
     tst r17
@@ -183,6 +194,7 @@ ISR_TIMER0_COMPA:
     cpi r16, MENSAJE_POSICIONES
     brlo TIMER0_GUARDAR
     clr r16
+
 TIMER0_GUARDAR:
     sts desplazamiento, r16
     ldi r16, 1
@@ -198,6 +210,133 @@ TIMER0_FIN:
     out SREG, r16
     pop r16
     reti
+
+USART_REVISAR_ENTRADA:
+    lds  r17, UCSR0A
+    sbrs r17, RXC0
+    ret
+
+    lds  r16, UDR0
+
+    cpi  r16, 'M'
+    breq USART_PEDIR_MENU
+    cpi  r16, 'm'
+    breq USART_PEDIR_MENU
+
+    ; CR y LF se ignoran para que la tecla Enter no produzca un error.
+    cpi  r16, 13
+    breq USART_ENTRADA_FIN
+    cpi  r16, 10
+    breq USART_ENTRADA_FIN
+
+    cpi  r16, '1'
+    brlo USART_ENTRADA_INVALIDA
+    cpi  r16, '8'
+    brsh USART_ENTRADA_INVALIDA
+
+    ; Convertir ASCII '1'..'7' en modo interno 0..6.
+    subi r16, '1'
+    rcall SELECCIONAR_MODO
+
+    ldi  r30, low(TEXTO_OK*2)
+    ldi  r31, high(TEXTO_OK*2)
+    rcall USART_ENVIAR_CADENA
+    ret
+
+USART_PEDIR_MENU:
+    rcall USART_MOSTRAR_MENU
+    ret
+
+USART_ENTRADA_INVALIDA:
+    ldi  r30, low(TEXTO_ERROR*2)
+    ldi  r31, high(TEXTO_ERROR*2)
+    rcall USART_ENVIAR_CADENA
+
+USART_ENTRADA_FIN:
+    ret
+
+; r16 recibe el nuevo modo. Se reinician el scroll y la bandera de pantalla.
+SELECCIONAR_MODO:
+    cli
+    sts  modo_actual, r16
+    clr  r17
+    sts  desplazamiento, r17
+    ldi  r17, low(VELOCIDAD_SCROLL_MS)
+    sts  tiempo_scroll_L, r17
+    ldi  r17, high(VELOCIDAD_SCROLL_MS)
+    sts  tiempo_scroll_H, r17
+    ldi  r17, 1
+    sts  actualizar_matriz, r17
+    sei
+    ret
+
+;---------------------------- USART -------------------------------------------
+; 16 MHz, modo normal: UBRR0=103 produce aproximadamente 9600 baudios.
+INICIALIZAR_USART:
+    clr r16
+    sts UCSR0A, r16
+    sts UBRR0H, r16
+    ldi r16, 103
+    sts UBRR0L, r16
+
+    ; Habilitar receptor y transmisor; no se usa interrupcion de recepcion.
+    ldi r16, (1<<RXEN0) | (1<<TXEN0)
+    sts UCSR0B, r16
+
+    ; 8 bits de datos, sin paridad y un bit de parada (8N1).
+    ldi r16, (1<<UCSZ01) | (1<<UCSZ00)
+    sts UCSR0C, r16
+    ret
+
+; Envia por UART el byte que llega en r16.
+USART_ENVIAR_BYTE:
+    lds  r17, UCSR0A
+    sbrs r17, UDRE0
+    rjmp USART_ENVIAR_BYTE
+    sts  UDR0, r16
+    ret
+
+; Envia una cadena terminada en cero desde la memoria de programa apuntada por Z.
+USART_ENVIAR_CADENA:
+    lpm  r16, Z+
+    tst  r16
+    breq USART_CADENA_FIN
+    rcall USART_ENVIAR_BYTE
+    rjmp USART_ENVIAR_CADENA
+
+USART_CADENA_FIN:
+    ret
+
+; Imprime el menu por lineas. Separar las cadenas simplifica su edicion.
+USART_MOSTRAR_MENU:
+    ldi r30, low(TEXTO_MENU_1*2)
+    ldi r31, high(TEXTO_MENU_1*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_2*2)
+    ldi r31, high(TEXTO_MENU_2*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_3*2)
+    ldi r31, high(TEXTO_MENU_3*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_4*2)
+    ldi r31, high(TEXTO_MENU_4*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_5*2)
+    ldi r31, high(TEXTO_MENU_5*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_6*2)
+    ldi r31, high(TEXTO_MENU_6*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_7*2)
+    ldi r31, high(TEXTO_MENU_7*2)
+    rcall USART_ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_FIN*2)
+    ldi r31, high(TEXTO_MENU_FIN*2)
+    rcall USART_ENVIAR_CADENA
+    ret
+
+
+
 
 
 ; Configura el MAX7219 para controlar las ocho filas de la matriz.
@@ -280,6 +419,7 @@ MOSTRAR_IMAGEN:
     clr r18
 
     lds r16, modo_actual
+    dec r16
     lsl r16
     lsl r16
     lsl r16
@@ -359,6 +499,29 @@ MENSAJE_LED_APAGADO:
     pop r17
     pop r16
     ret
+
+TEXTO_BIENVENIDA:
+    .db 13,10,"=== LABORATORIO 2 - PROBLEMA A ===",13,10,"Matriz FC16/MAX7219 - UART 9600 8N1",13,10,0
+TEXTO_MENU_1:
+    .db 13,10,"1 - Mensaje: VIAJE ANTES QUE DESTINO",13,10,0,0
+TEXTO_MENU_2:
+    .db "2 - Carita sonriendo",13,10,0,0
+TEXTO_MENU_3:
+    .db "3 - Carita guinando",13,10,0
+TEXTO_MENU_4:
+    .db "4 - Corazon",13,10,0
+TEXTO_MENU_5:
+    .db "5 - :3",13,10,0,0
+TEXTO_MENU_6:
+    .db "6 - Asterisco",13,10,0
+TEXTO_MENU_7:
+    .db "7 - XD",13,10,0,0
+TEXTO_MENU_FIN:
+    .db "M - Repetir menu",13,10,"> ",0,0
+TEXTO_OK:
+    .db 13,10,"Opcion aplicada. Ingrese 1..7 o M.",13,10,"> ",0,0
+TEXTO_ERROR:
+    .db 13,10,"Entrada invalida. Ingrese 1..7 o M.",13,10,"> ",0
 MENSAJE_COLUMNAS:
     ; Ocho columnas vacías para que el mensaje entre desde la derecha.
     .db 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
