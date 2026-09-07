@@ -17,7 +17,19 @@ INICIO:
     out PORTD, r16
     out PORTB, r16
 
-    ;Configurar Timer0 en modo CTC
+    ;USART 9600 baudios
+    ldi r16, 103
+    sts UBRR0L, r16
+
+    ldi r16, 0 
+    sts UBRR0H, r16
+
+    ldi r16, (1<<RXEN0)
+    sts UCSR0B, r16
+
+    ldi r16, (1<<UCSZ01) | (1<<UCSZ00)
+    sts UCSR0C, r16
+
     ldi r16, (1<<WGM01)
     out TCCR0A, r16
 
@@ -35,6 +47,7 @@ INICIO:
 
     ; 256 muestras
     ldi r20, 0
+    ldi r21, 1
 
 
 BUCLE:
@@ -42,7 +55,7 @@ BUCLE:
     ; Revisar bandera del Timer
     in r16, TIFR0
     sbrs r16, OCF0A
-    rjmp BUCLE
+    rjmp SERIAL
 
     ; Limpiar bandera
     ldi r16, (1<<OCF0A)
@@ -69,16 +82,50 @@ BUCLE:
 
     ; Contador de muestras
     dec r20
-    brne BUCLE
+    brne SERIAL
 
-    ; Reiniciar la tabla
+    cpi r21, 1
+    breq RECARGAR_1
+
+    rjmp RECARGAR_9
+
+RECARGAR_1:
     ldi ZL, LOW(SENAL_1 * 2)
     ldi ZH, HIGH(SENAL_1 * 2)
-
     ldi r20, 0
+    ldi r21, 1
 
     rjmp BUCLE
 
+RECARGAR_9:
+    ldi ZL, LOW(SENAL_9 * 2)
+    ldi ZH, HIGH(SENAL_9 * 2)
+    ldi r20, 32
+    ldi r21, 9
+    rjmp BUCLE   
+
+
+SERIAL:
+    lds r16, UCSR0A
+    sbrs r16, RXC0
+    rjmp BUCLE
+
+    lds r16, UDR0
+
+    cpi r16, '1'
+    breq RECARGAR_1
+
+    cpi r16, '9'
+    breq RECARGAR_9
+
+    rjmp BUCLE
+
+
+SENAL_9:
+    .db 0x00, 0x01, 0x02, 0x03, 0x05, 0x07, 0x0a, 0x0e
+    .db 0x13, 0x19, 0x21, 0x2b, 0x37, 0x46, 0x58, 0x6d
+    .db 0x85, 0xa0, 0xbf, 0xe2, 0xff, 0xff, 0xff, 0xff
+    .db 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff 
 
 SENAL_1:
     .db 0x80, 0x83, 0x86, 0x89, 0x8c, 0x8f, 0x92, 0x95, 0x98, 0x9c, 0x9f, 0xa2, 0xa5, 0xa8, 0xab, 0xae
