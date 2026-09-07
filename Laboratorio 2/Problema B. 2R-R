@@ -1,5 +1,10 @@
 .include "m328pdef.inc"
 
+; CONSTANTES
+.equ F_CPU = 16000000
+.equ BAUD = 9600
+.equ UBRR_VAL = 103
+
 .cseg                         ;Comienza el codigo
 .org 0x0000                   ;direccion de memoria
     rjmp INICIO
@@ -17,12 +22,12 @@ INICIO:
     out PORTD, r16
     out PORTB, r16
 
-    ;USART 9600 baudios
-    ldi r16, 103
-    sts UBRR0L, r16
-
-    ldi r16, 0 
+    ; Configurar USART
+    ldi r16, HIGH(UBRR_VAL)
     sts UBRR0H, r16
+
+    ldi r16, LOW(UBRR_VAL)
+    sts UBRR0L, r16
 
     ldi r16, (1<<RXEN0)
     sts UCSR0B, r16
@@ -41,21 +46,14 @@ INICIO:
     ldi r16, 249
     out OCR0A, r16
 
-    ; Apuntar a la Señal 1
-    ldi ZL, LOW(SENAL_1 * 2)
-    ldi ZH, HIGH(SENAL_1 * 2)
+    rjmp CARGA_S1
 
-    ; 256 muestras
-    ldi r20, 0
-    ldi r21, 1
-
-
-BUCLE:
+BUCLE_PRINCIPAL:
 
     ; Revisar bandera del Timer
     in r16, TIFR0
     sbrs r16, OCF0A
-    rjmp SERIAL
+    rjmp REVISAR_SERIAL
 
     ; Limpiar bandera
     ldi r16, (1<<OCF0A)
@@ -82,12 +80,33 @@ BUCLE:
 
     ; Contador de muestras
     dec r20
-    brne SERIAL
+    brne REVISAR_SERIAL
 
     cpi r21, 1
     breq RECARGAR_1
 
     rjmp RECARGAR_9
+
+REVISAR_SERIAL:
+
+    ; Revisar USART
+    lds r16, UCSR0A
+    sbrs r16, RXC0
+    rjmp BUCLE_PRINCIPAL
+
+    ; Leer dato
+    lds r16, UDR0
+
+    ; Seleccionar señal
+    cpi r16, '1'
+    breq CARGAR_S1
+
+    cpi r16, '9'
+    breq CARGAR_S9
+
+    ; Ignorar otros datos
+    rjmp BUCLE_PRINCIPA
+
 
 RECARGAR_1:
     ldi ZL, LOW(SENAL_1 * 2)
