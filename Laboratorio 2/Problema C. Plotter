@@ -1,1 +1,251 @@
+; Laboratorio 2 - Problema C: Plotter
+; Primera version para probar las conexiones de la maquina
 
+.include "m328pdef.inc"
+
+; Pines conectados al PLC
+.equ CMD_BAJAR_LAPIZ = (1<<PD2)
+.equ CMD_SUBIR_LAPIZ = (1<<PD3)
+.equ CMD_ABAJO       = (1<<PD4)
+.equ CMD_ARRIBA      = (1<<PD5)
+.equ CMD_DERECHA     = (1<<PD6)
+.equ CMD_IZQUIERDA   = (1<<PD7)
+
+.equ MASCARA_PLOTTER = (1<<PD2) | (1<<PD3) | (1<<PD4) | (1<<PD5) | (1<<PD6) | (1<<PD7)
+.equ PULSO_MOV_MS    = 1000
+.equ PULSO_LAPIZ_MS  = 500
+
+; Variables que usa el temporizador
+.dseg
+tiempo_restante_L: .byte 1
+tiempo_restante_H: .byte 1
+salida_activa:      .byte 1
+
+.cseg
+
+.org 0x0000
+    rjmp RESET
+
+.org OC0Aaddr
+    rjmp ISR_TIMER0_COMPA
+
+.org INT_VECTORS_SIZE
+
+RESET:
+    cli
+
+    ; Inicializo la pila
+    ldi r16, high(RAMEND)
+    out SPH, r16
+    ldi r16, low(RAMEND)
+    out SPL, r16
+
+    ; D2 hasta D7 son salidas para la maquina
+    clr r16
+    out PORTD, r16
+    ldi r16, MASCARA_PLOTTER
+    out DDRD, r16
+
+    clr r16
+    sts tiempo_restante_L, r16
+    sts tiempo_restante_H, r16
+    sts salida_activa, r16
+
+    rcall INICIALIZAR_USART
+    rcall INICIALIZAR_TIMER0
+    sei
+
+    rcall MOSTRAR_MENU
+
+PRINCIPAL:
+    rcall REVISAR_USART
+    rjmp PRINCIPAL
+
+; El Timer0 interrumpe cada 1 ms
+INICIALIZAR_TIMER0:
+    ldi r16, (1<<WGM01)
+    out TCCR0A, r16
+    ldi r16, 249
+    out OCR0A, r16
+    clr r16
+    out TCNT0, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    ldi r16, (1<<OCIE0A)
+    sts TIMSK0, r16
+    ldi r16, (1<<CS01) | (1<<CS00)
+    out TCCR0B, r16
+    ret
+
+ISR_TIMER0_COMPA:
+    push r16
+    in r16, SREG
+    push r16
+    push r17
+
+    lds r16, salida_activa
+    tst r16
+    breq TIMER_FIN
+
+    ; Resto un milisegundo al tiempo del pulso
+    lds r16, tiempo_restante_L
+    lds r17, tiempo_restante_H
+    subi r16, 1
+    sbci r17, 0
+    sts tiempo_restante_L, r16
+    sts tiempo_restante_H, r17
+
+    or r16, r17
+    brne TIMER_FIN
+
+    ; Cuando llega a cero apago todas las ordenes
+    clr r16
+    out PORTD, r16
+    sts salida_activa, r16
+
+TIMER_FIN:
+    pop r17
+    pop r16
+    out SREG, r16
+    pop r16
+    reti
+
+; r16 tiene la salida y r25:r24 el tiempo en ms
+INICIAR_PULSO:
+    cli
+    sts tiempo_restante_L, r24
+    sts tiempo_restante_H, r25
+    ldi r18, 1
+    sts salida_activa, r18
+    andi r16, MASCARA_PLOTTER
+    out PORTD, r16
+    sei
+    ret
+
+; Espero hasta que el Timer0 termine el movimiento
+PULSO_ESPERAR:
+    rcall INICIAR_PULSO
+
+ESPERAR_PULSO:
+    lds r18, salida_activa
+    tst r18
+    brne ESPERAR_PULSO
+    ret
+
+DETENER_PLOTTER:
+    cli
+    clr r16
+    out PORTD, r16
+    sts tiempo_restante_L, r16
+    sts tiempo_restante_H, r16
+    sts salida_activa, r16
+    sei
+    ret
+
+; Configuracion serie: 9600 baudios, 8 bits, sin paridad y 1 bit de parada
+INICIALIZAR_USART:
+    clr r16
+    sts UCSR0A, r16
+    sts UBRR0H, r16
+    ldi r16, 103
+    sts UBRR0L, r16
+
+    ldi r16, (1<<RXEN0) | (1<<TXEN0)
+    sts UCSR0B, r16
+    ldi r16, (1<<UCSZ01) | (1<<UCSZ00)
+    sts UCSR0C, r16
+    ret
+
+REVISAR_USART:
+    lds r17, UCSR0A
+    sbrs r17, RXC0
+    ret
+
+    lds r16, UDR0
+
+    cpi r16, 'B'
+    breq BAJAR_LAPIZ
+    cpi r16, 'U'
+    breq SUBIR_LAPIZ
+    cpi r16, 'W'
+    breq MOVER_ARRIBA
+    cpi r16, 'S'
+    breq MOVER_ABAJO
+    cpi r16, 'A'
+    breq MOVER_IZQUIERDA
+    cpi r16, 'D'
+    breq MOVER_DERECHA
+    cpi r16, 'X'
+    breq PARAR
+    cpi r16, 'M'
+    breq VOLVER_A_MOSTRAR_MENU
+    ret
+
+BAJAR_LAPIZ:
+    ldi r16, CMD_BAJAR_LAPIZ
+    rjmp PULSO_LAPIZ
+
+SUBIR_LAPIZ:
+    ldi r16, CMD_SUBIR_LAPIZ
+
+PULSO_LAPIZ:
+    ldi r24, low(PULSO_LAPIZ_MS)
+    ldi r25, high(PULSO_LAPIZ_MS)
+    rcall PULSO_ESPERAR
+    ret
+
+MOVER_ARRIBA:
+    ldi r16, CMD_ARRIBA
+    rjmp PULSO_MOVIMIENTO
+
+MOVER_ABAJO:
+    ldi r16, CMD_ABAJO
+    rjmp PULSO_MOVIMIENTO
+
+MOVER_IZQUIERDA:
+    ldi r16, CMD_IZQUIERDA
+    rjmp PULSO_MOVIMIENTO
+
+MOVER_DERECHA:
+    ldi r16, CMD_DERECHA
+
+PULSO_MOVIMIENTO:
+    ; Con 1000 ms medimos 11,5 mm en X y 12 mm en Y
+    ldi r24, low(PULSO_MOV_MS)
+    ldi r25, high(PULSO_MOV_MS)
+    rcall PULSO_ESPERAR
+    ret
+
+PARAR:
+    rcall DETENER_PLOTTER
+    ret
+
+VOLVER_A_MOSTRAR_MENU:
+    rcall MOSTRAR_MENU
+    ret
+
+ENVIAR_BYTE:
+    lds r17, UCSR0A
+    sbrs r17, UDRE0
+    rjmp ENVIAR_BYTE
+    sts UDR0, r16
+    ret
+
+ENVIAR_CADENA:
+    lpm r16, Z+
+    tst r16
+    breq FIN_CADENA
+    rcall ENVIAR_BYTE
+    rjmp ENVIAR_CADENA
+
+FIN_CADENA:
+    ret
+
+MOSTRAR_MENU:
+    ldi r30, low(TEXTO_MENU*2)
+    ldi r31, high(TEXTO_MENU*2)
+    rcall ENVIAR_CADENA
+    ret
+
+TEXTO_MENU:
+    .db 13,10,"PRUEBA MANUAL DEL PLOTTER",13,10,"B bajar lapiz | U subir lapiz",13,10,"W arriba | S abajo | A izquierda | D derecha",13,10,"X detener | M mostrar menu",13,10,"> ",0,0
