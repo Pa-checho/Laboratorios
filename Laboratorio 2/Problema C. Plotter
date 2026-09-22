@@ -1,5 +1,5 @@
 ; Laboratorio 2 - Problema C: Plotter
-; Segunda version: menu y figuras geometricas
+; Version final: figuras geometricas y Magnemite
 
 .include "m328pdef.inc"
 
@@ -13,6 +13,8 @@
 
 .equ MASCARA_PLOTTER = (1<<PD2) | (1<<PD3) | (1<<PD4) | (1<<PD5) | (1<<PD6) | (1<<PD7)
 .equ PASO_MS         = 100
+.equ PASO_DDA_MS     = 20
+.equ SUBPASOS_DDA    = 5
 .equ PULSO_LAPIZ_MS  = 500
 
 ; Codigos que se guardan en las tablas de las figuras
@@ -205,11 +207,38 @@ Y_LISTO:
 
 MAX_LISTO:
     tst r26
+    brne HAY_MOVIMIENTO
+    ret
+
+HAY_MOVIMIENTO:
+    ; Las horizontales, verticales y diagonales iguales se hacen sin cortes
+    tst r20
+    breq MOVIMIENTO_CONTINUO
+    tst r21
+    breq MOVIMIENTO_CONTINUO
+    cp r20, r21
     brne PREPARAR_DDA
+
+MOVIMIENTO_CONTINUO:
+    ldi r18, PASO_MS
+    mul r26, r18
+    movw r24, r0
+    clr r1
+
+    mov r16, r22
+    or r16, r23
+    rcall PULSO_ESPERAR
     ret
 
 PREPARAR_DDA:
-    mov r27, r26
+    ; Para las otras pendientes uso cinco pulsos de 20 ms por cada paso
+    push r14
+    push r15
+    ldi r18, SUBPASOS_DDA
+    mul r26, r18
+    mov r14, r0
+    mov r15, r1
+    clr r1
     clr r28
     clr r29
 
@@ -230,18 +259,25 @@ SIN_MOVIMIENTO_X:
     or r16, r23
 
 SIN_MOVIMIENTO_Y:
-    ldi r24, low(PASO_MS)
-    ldi r25, high(PASO_MS)
+    ldi r24, low(PASO_DDA_MS)
+    ldi r25, high(PASO_DDA_MS)
     rcall PULSO_ESPERAR
 
     lds r18, dibujo_abortado
     tst r18
     brne FIN_DDA
 
-    dec r27
+    ldi r18, 1
+    sub r14, r18
+    clr r18
+    sbc r15, r18
+    mov r18, r14
+    or r18, r15
     brne BUCLE_DDA
 
 FIN_DDA:
+    pop r15
+    pop r14
     ret
 
 ; Cada orden de la tabla ocupa cuatro bytes
@@ -327,8 +363,28 @@ PROBAR_3:
 
 PROBAR_4:
     cpi r16, '4'
-    brne PROBAR_M
+    brne PROBAR_P
     rjmp DIBUJAR_CUADRADO
+
+PROBAR_P:
+    cpi r16, 'P'
+    brne PROBAR_P_MINUSCULA
+    rjmp DIBUJAR_MAGNEMITE
+
+PROBAR_P_MINUSCULA:
+    cpi r16, 'p'
+    brne PROBAR_T
+    rjmp DIBUJAR_MAGNEMITE
+
+PROBAR_T:
+    cpi r16, 'T'
+    brne PROBAR_T_MINUSCULA
+    rjmp DIBUJAR_TODAS
+
+PROBAR_T_MINUSCULA:
+    cpi r16, 't'
+    brne PROBAR_M
+    rjmp DIBUJAR_TODAS
 
 PROBAR_M:
     cpi r16, 'M'
@@ -393,6 +449,22 @@ DIBUJAR_CUADRADO:
     rcall ENVIAR_CADENA
     ldi r30, low(TABLA_CUADRADO*2)
     ldi r31, high(TABLA_CUADRADO*2)
+    rjmp EJECUTAR_DIBUJO
+
+DIBUJAR_MAGNEMITE:
+    ldi r30, low(TEXTO_MAGNEMITE*2)
+    ldi r31, high(TEXTO_MAGNEMITE*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_MAGNEMITE*2)
+    ldi r31, high(TABLA_MAGNEMITE*2)
+    rjmp EJECUTAR_DIBUJO
+
+DIBUJAR_TODAS:
+    ldi r30, low(TEXTO_TODAS*2)
+    ldi r31, high(TEXTO_TODAS*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_TODAS*2)
+    ldi r31, high(TABLA_TODAS*2)
 
 EJECUTAR_DIBUJO:
     rcall EJECUTAR_TABLA
@@ -443,13 +515,48 @@ FIN_CADENA:
     ret
 
 MOSTRAR_MENU:
-    ldi r30, low(TEXTO_MENU*2)
-    ldi r31, high(TEXTO_MENU*2)
+    ldi r30, low(TEXTO_MENU_1*2)
+    ldi r31, high(TEXTO_MENU_1*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_2*2)
+    ldi r31, high(TEXTO_MENU_2*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_3*2)
+    ldi r31, high(TEXTO_MENU_3*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_4*2)
+    ldi r31, high(TEXTO_MENU_4*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_5*2)
+    ldi r31, high(TEXTO_MENU_5*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_6*2)
+    ldi r31, high(TEXTO_MENU_6*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_7*2)
+    ldi r31, high(TEXTO_MENU_7*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TEXTO_MENU_8*2)
+    ldi r31, high(TEXTO_MENU_8*2)
     rcall ENVIAR_CADENA
     ret
 
-TEXTO_MENU:
-    .db 13,10,"PLOTTER - MENU DE FIGURAS",13,10,"Antes de dibujar use el RESET fisico.",13,10,"1 Triangulo | 2 Circulo | 3 Pentagrama | 4 Cuadrado",13,10,"M repetir menu | X abortar dibujo",13,10,"> ",0,0
+TEXTO_MENU_1:
+    .db 13,10,"PLOTTER - MENU DE FIGURAS",13,10,0,0,0
+TEXTO_MENU_2:
+    .db "Antes de cada figura individual use el RESET fisico.",13,10,0,0
+TEXTO_MENU_3:
+    .db "1 - Triangulo de aproximadamente 100 mm",13,10,0,0,0
+TEXTO_MENU_4:
+    .db "2 - Circulo de aproximadamente 100 mm",13,10,0
+TEXTO_MENU_5:
+    .db "3 - Pentagrama de aproximadamente 100 mm",13,10,0,0
+TEXTO_MENU_6:
+    .db "4 - Cuadrado de aproximadamente 100 mm",13,10,0,0
+TEXTO_MENU_7:
+    .db "P - Magnemite | T - Todas las figuras",13,10,0,0,0
+TEXTO_MENU_8:
+    .db "M repetir menu | X abortar dibujo",13,10,"> ",0,0,0
 
 TEXTO_TRIANGULO:
     .db 13,10,"Dibujando triangulo...",13,10,0,0
@@ -459,6 +566,10 @@ TEXTO_PENTAGRAMA:
     .db 13,10,"Dibujando pentagrama...",13,10,0
 TEXTO_CUADRADO:
     .db 13,10,"Dibujando cuadrado...",13,10,0
+TEXTO_MAGNEMITE:
+    .db 13,10,"Dibujando Magnemite...",13,10,0,0
+TEXTO_TODAS:
+    .db 13,10,"Dibujando todas las figuras...",13,10,0,0
 TEXTO_TERMINADO:
     .db 13,10,"Dibujo terminado.",13,10,0
 TEXTO_ABORTADO:
@@ -466,7 +577,7 @@ TEXTO_ABORTADO:
 TEXTO_DETENIDO:
     .db 13,10,"Salidas detenidas.",13,10,0,0
 TEXTO_ERROR:
-    .db 13,10,"Opcion invalida. Use 1,2,3,4,M o X.",13,10,0
+    .db 13,10,"Opcion invalida. Use 1,2,3,4,P,T,M o X.",13,10,0,0,0
 
 ; Los movimientos son relativos al punto actual
 ; Cada linea guarda operacion, X, Y y un byte libre
@@ -539,5 +650,299 @@ TABLA_CUADRADO:
     .db OP_LINEA, 0x00, 0x53, 0
     .db OP_LINEA, 0xAA, 0x00, 0
     .db OP_LINEA, 0x00, 0xAD, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
+
+TABLA_MAGNEMITE:
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x78, 0x30, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x07, 0x00, 0
+    .db OP_LINEA, 0x06, 0x03, 0
+    .db OP_LINEA, 0x05, 0x04, 0
+    .db OP_LINEA, 0x05, 0x05, 0
+    .db OP_LINEA, 0x02, 0x06, 0
+    .db OP_LINEA, 0x01, 0x07, 0
+    .db OP_LINEA, 0xFF, 0x06, 0
+    .db OP_LINEA, 0xFE, 0x06, 0
+    .db OP_LINEA, 0xFB, 0x05, 0
+    .db OP_LINEA, 0xFB, 0x04, 0
+    .db OP_LINEA, 0xFA, 0x03, 0
+    .db OP_LINEA, 0xF9, 0x01, 0
+    .db OP_LINEA, 0xF9, 0xFF, 0
+    .db OP_LINEA, 0xFA, 0xFD, 0
+    .db OP_LINEA, 0xFB, 0xFC, 0
+    .db OP_LINEA, 0xFB, 0xFB, 0
+    .db OP_LINEA, 0xFE, 0xFA, 0
+    .db OP_LINEA, 0xFF, 0xFA, 0
+    .db OP_LINEA, 0x01, 0xF9, 0
+    .db OP_LINEA, 0x02, 0xFA, 0
+    .db OP_LINEA, 0x05, 0xFB, 0
+    .db OP_LINEA, 0x05, 0xFC, 0
+    .db OP_LINEA, 0x06, 0xFD, 0
+    .db OP_LINEA, 0x07, 0x00, 0
+
+    ; Los imanes son dos herraduras acostadas
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x19, 0x10, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x10, 0
+    .db OP_LINEA, 0x08, 0x08, 0
+    .db OP_LINEA, 0x0F, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFA, 0
+    .db OP_LINEA, 0xF3, 0x00, 0
+    .db OP_LINEA, 0xFC, 0xFC, 0
+    .db OP_LINEA, 0x00, 0xF4, 0
+    .db OP_LINEA, 0x04, 0xFC, 0
+    .db OP_LINEA, 0x0D, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFA, 0
+    .db OP_LINEA, 0xF1, 0x00, 0
+    .db OP_LINEA, 0xF8, 0x08, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Marcas del iman izquierdo
+    .db OP_LINEA, 0x13, 0xF8, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x06, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x14, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x06, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Iman derecho
+    .db OP_LINEA, 0xBB, 0xE8, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x10, 0
+    .db OP_LINEA, 0xF8, 0x08, 0
+    .db OP_LINEA, 0xF1, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFA, 0
+    .db OP_LINEA, 0x0D, 0x00, 0
+    .db OP_LINEA, 0x04, 0xFC, 0
+    .db OP_LINEA, 0x00, 0xF4, 0
+    .db OP_LINEA, 0xFC, 0xFC, 0
+    .db OP_LINEA, 0xF3, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFA, 0
+    .db OP_LINEA, 0x0F, 0x00, 0
+    .db OP_LINEA, 0x08, 0x08, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Marcas del iman derecho
+    .db OP_LINEA, 0xED, 0xF8, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x06, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x14, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x06, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Ojo y pupila
+    .db OP_LINEA, 0x2C, 0xE8, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x04, 0x01, 0
+    .db OP_LINEA, 0x04, 0x03, 0
+    .db OP_LINEA, 0x01, 0x05, 0
+    .db OP_LINEA, 0xFF, 0x04, 0
+    .db OP_LINEA, 0xFC, 0x03, 0
+    .db OP_LINEA, 0xFC, 0x01, 0
+    .db OP_LINEA, 0xFC, 0xFF, 0
+    .db OP_LINEA, 0xFC, 0xFD, 0
+    .db OP_LINEA, 0xFF, 0xFC, 0
+    .db OP_LINEA, 0x01, 0xFB, 0
+    .db OP_LINEA, 0x04, 0xFD, 0
+    .db OP_LINEA, 0x04, 0xFF, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x04, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x0A, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Tornillo de arriba con forma de T
+    .db OP_LINEA, 0xFD, 0xE2, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0xF3, 0
+    .db OP_LINEA, 0xFA, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFC, 0
+    .db OP_LINEA, 0x12, 0x00, 0
+    .db OP_LINEA, 0x00, 0x04, 0
+    .db OP_LINEA, 0xFA, 0x00, 0
+    .db OP_LINEA, 0x00, 0x0D, 0
+    .db OP_LINEA, 0xFA, 0x00, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Rayas de la rosca
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x06, 0x00, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0xFA, 0xFC, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x06, 0x00, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0xFA, 0xFC, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x06, 0x00, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
+
+TABLA_TODAS:
+    ; Triangulo reducido
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x27, 0x11, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0xED, 0x13, 0
+    .db OP_LINEA, 0x26, 0x00, 0
+    .db OP_LINEA, 0xED, 0xED, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Circulo reducido
+    .db OP_LINEA, 0x51, 0x00, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x06, 0x01, 0
+    .db OP_LINEA, 0x06, 0x02, 0
+    .db OP_LINEA, 0x04, 0x05, 0
+    .db OP_LINEA, 0x03, 0x05, 0
+    .db OP_LINEA, 0x01, 0x06, 0
+    .db OP_LINEA, 0xFF, 0x06, 0
+    .db OP_LINEA, 0xFD, 0x05, 0
+    .db OP_LINEA, 0xFC, 0x04, 0
+    .db OP_LINEA, 0xFA, 0x03, 0
+    .db OP_LINEA, 0xFA, 0x01, 0
+    .db OP_LINEA, 0xFA, 0xFF, 0
+    .db OP_LINEA, 0xFA, 0xFD, 0
+    .db OP_LINEA, 0xFC, 0xFC, 0
+    .db OP_LINEA, 0xFD, 0xFB, 0
+    .db OP_LINEA, 0xFF, 0xFA, 0
+    .db OP_LINEA, 0x01, 0xFA, 0
+    .db OP_LINEA, 0x03, 0xFB, 0
+    .db OP_LINEA, 0x04, 0xFB, 0
+    .db OP_LINEA, 0x06, 0xFE, 0
+    .db OP_LINEA, 0x06, 0xFF, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Pentagrama reducido sin circulo exterior
+    .db OP_LINEA, 0x51, 0x00, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0xF2, 0x1E, 0
+    .db OP_LINEA, 0x21, 0xED, 0
+    .db OP_LINEA, 0xDA, 0x00, 0
+    .db OP_LINEA, 0x21, 0x13, 0
+    .db OP_LINEA, 0xF2, 0xE2, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Cuadrado reducido
+    .db OP_LINEA, 0xB3, 0x22, 0
+    .db OP_LINEA, 0xB2, 0x22, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x27, 0x00, 0
+    .db OP_LINEA, 0x00, 0x26, 0
+    .db OP_LINEA, 0xD9, 0x00, 0
+    .db OP_LINEA, 0x00, 0xDA, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Magnemite reducido
+    .db OP_LINEA, 0x73, 0x07, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x05, 0x01, 0
+    .db OP_LINEA, 0x04, 0x02, 0
+    .db OP_LINEA, 0x03, 0x04, 0
+    .db OP_LINEA, 0x01, 0x05, 0
+    .db OP_LINEA, 0xFF, 0x05, 0
+    .db OP_LINEA, 0xFD, 0x04, 0
+    .db OP_LINEA, 0xFC, 0x03, 0
+    .db OP_LINEA, 0xFB, 0x01, 0
+    .db OP_LINEA, 0xFB, 0xFF, 0
+    .db OP_LINEA, 0xFC, 0xFD, 0
+    .db OP_LINEA, 0xFD, 0xFC, 0
+    .db OP_LINEA, 0xFF, 0xFB, 0
+    .db OP_LINEA, 0x01, 0xFB, 0
+    .db OP_LINEA, 0x03, 0xFC, 0
+    .db OP_LINEA, 0x04, 0xFE, 0
+    .db OP_LINEA, 0x05, 0xFF, 0
+
+    ; Iman izquierdo reducido
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x0D, 0x08, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x08, 0
+    .db OP_LINEA, 0x04, 0x04, 0
+    .db OP_LINEA, 0x0A, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LINEA, 0xF8, 0x00, 0
+    .db OP_LINEA, 0xFD, 0xFD, 0
+    .db OP_LINEA, 0x00, 0xFC, 0
+    .db OP_LINEA, 0x03, 0xFD, 0
+    .db OP_LINEA, 0x08, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LINEA, 0xF6, 0x00, 0
+    .db OP_LINEA, 0xFC, 0x04, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x0B, 0xFC, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x03, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x0A, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x03, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Iman derecho reducido
+    .db OP_LINEA, 0xDB, 0xF4, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x08, 0
+    .db OP_LINEA, 0xFC, 0x04, 0
+    .db OP_LINEA, 0xF6, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LINEA, 0x08, 0x00, 0
+    .db OP_LINEA, 0x03, 0xFD, 0
+    .db OP_LINEA, 0x00, 0xFC, 0
+    .db OP_LINEA, 0xFD, 0xFD, 0
+    .db OP_LINEA, 0xF8, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LINEA, 0x0A, 0x00, 0
+    .db OP_LINEA, 0x04, 0x04, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0xF5, 0xFC, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x03, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x0A, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x03, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Ojo de Magnemite reducido
+    .db OP_LINEA, 0x18, 0xF4, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x03, 0x01, 0
+    .db OP_LINEA, 0x01, 0x03, 0
+    .db OP_LINEA, 0xFF, 0x03, 0
+    .db OP_LINEA, 0xFD, 0x01, 0
+    .db OP_LINEA, 0xFD, 0xFF, 0
+    .db OP_LINEA, 0xFF, 0xFD, 0
+    .db OP_LINEA, 0x01, 0xFD, 0
+    .db OP_LINEA, 0x03, 0xFF, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x02, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0x05, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+
+    ; Tornillo reducido
+    .db OP_LINEA, 0xFE, 0xF1, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFB, 0
+    .db OP_LINEA, 0xFC, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFC, 0
+    .db OP_LINEA, 0x0C, 0x00, 0
+    .db OP_LINEA, 0x00, 0x04, 0
+    .db OP_LINEA, 0xFC, 0x00, 0
+    .db OP_LINEA, 0x00, 0x05, 0
+    .db OP_LINEA, 0xFC, 0x00, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x00, 0xFD, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x04, 0x00, 0
     .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
     .db OP_FIN, 0, 0, 0
