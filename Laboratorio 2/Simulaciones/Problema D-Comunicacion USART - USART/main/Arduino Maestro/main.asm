@@ -1,0 +1,83 @@
+.include "m328pdef.inc"
+
+.org 0x0000
+    rjmp inicio
+
+
+inicio:
+    ;PC0, PC1 y PC2 se utilizan como entradas.
+    ;Estos tres pines representan los 3 bits de
+    ;informacion que se enviaran al esclavo.
+    clr r16
+    out DDRC, r16           ;Puerto C configurado como entrada
+
+    ;Habilitar resistencias Pull-up internas
+    ;solamente en PC0, PC1 y PC2.
+    ldi r16, 0b00000111
+    out PORTC, r16
+
+    ;USART configurada a 9600 baudios suponiendo
+    ;una frecuencia de reloj de 16 MHz.
+
+    ldi r16, 103
+    sts UBRR0L, r16
+
+    ldi r16, 0
+    sts UBRR0H, r16
+
+    ;TXEN0 habilita la transmision de datos mediante
+    ;el pin TX del ATmega328P.
+    ldi r16, (1<<TXEN0)
+    sts UCSR0B, r16
+
+    ;La USART transmite una trama con:
+    ;8 bits de datos
+    ;sin paridad
+    ;1 bit de parada
+    ;
+    ;Aunque la trama USART utiliza 8 bits,
+    ;nuestro sistema utiliza solamente 3 bits
+    ;de informacion, correspondientes a los
+    ;tres switches.
+
+    ldi r16, (1<<UCSZ01)|(1<<UCSZ00)
+    sts UCSR0C, r16
+
+
+bucle_principal:
+
+    ;Se lee todo el Puerto C y se guarda en r17.
+    in r17, PINC
+
+    ;La mascara 00000111 elimina los bits que no
+    ;orresponden a PC0, PC1 y PC2.
+    andi r17, 0b00000111
+    com r17
+
+    ;COM invierte los 8 bits del registro, por eso
+    ;se vuelve a aplicar la mascara.
+    ;
+    ;El resultado final siempre queda entre:
+    ;
+    ;00000000 = 0
+    ;y
+    ;00000111 = 7
+    ;
+    ;Es decir, tenemos 3 bits de informacion util.
+    andi r17, 0b00000111
+
+
+esperar_tx:
+
+    lds r18, UCSR0A
+    sbrs r18, UDRE0
+    rjmp esperar_tx
+
+    ;el maestro transmite un valor
+    ;de 3 bits (0 a 7) contenido dentro de una
+    ;trama USART de 8 bits.
+    sts UDR0, r17
+
+    ;Volver a leer los switches y enviar
+    ;nuevamente su estado.
+    rjmp bucle_principal
