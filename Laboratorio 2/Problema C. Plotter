@@ -1,5 +1,5 @@
 ; Laboratorio 2 - Problema C: Plotter
-; Primera version para probar las conexiones de la maquina
+; Segunda version: menu y figuras geometricas
 
 .include "m328pdef.inc"
 
@@ -12,14 +12,21 @@
 .equ CMD_IZQUIERDA   = (1<<PD7)
 
 .equ MASCARA_PLOTTER = (1<<PD2) | (1<<PD3) | (1<<PD4) | (1<<PD5) | (1<<PD6) | (1<<PD7)
-.equ PULSO_MOV_MS    = 1000
+.equ PASO_MS         = 100
 .equ PULSO_LAPIZ_MS  = 500
+
+; Codigos que se guardan en las tablas de las figuras
+.equ OP_FIN          = 0
+.equ OP_LINEA        = 1
+.equ OP_LAPIZ_ARRIBA = 2
+.equ OP_LAPIZ_ABAJO  = 3
 
 ; Variables que usa el temporizador
 .dseg
 tiempo_restante_L: .byte 1
 tiempo_restante_H: .byte 1
 salida_activa:      .byte 1
+dibujo_abortado:    .byte 1
 
 .cseg
 
@@ -50,6 +57,7 @@ RESET:
     sts tiempo_restante_L, r16
     sts tiempo_restante_H, r16
     sts salida_activa, r16
+    sts dibujo_abortado, r16
 
     rcall INICIALIZAR_USART
     rcall INICIALIZAR_TIMER0
@@ -129,7 +137,25 @@ PULSO_ESPERAR:
 ESPERAR_PULSO:
     lds r18, salida_activa
     tst r18
+    breq FIN_PULSO
+
+    ; Mientras dibuja se puede mandar X para parar
+    lds r18, UCSR0A
+    sbrs r18, RXC0
+    rjmp ESPERAR_PULSO
+
+    lds r18, UDR0
+    cpi r18, 'X'
+    breq ABORTAR_PULSO
+    cpi r18, 'x'
     brne ESPERAR_PULSO
+
+ABORTAR_PULSO:
+    rcall DETENER_PLOTTER
+    ldi r18, 1
+    sts dibujo_abortado, r18
+
+FIN_PULSO:
     ret
 
 DETENER_PLOTTER:
@@ -140,6 +166,128 @@ DETENER_PLOTTER:
     sts tiempo_restante_H, r16
     sts salida_activa, r16
     sei
+    ret
+
+; r20 es el movimiento en X y r21 es el movimiento en Y
+; Los numeros positivos van a izquierda y abajo
+MOVER_LINEA_DDA:
+    clr r22
+    sbrs r20, 7
+    rjmp X_POSITIVO
+    neg r20
+    ldi r22, CMD_DERECHA
+    rjmp X_LISTO
+
+X_POSITIVO:
+    tst r20
+    breq X_LISTO
+    ldi r22, CMD_IZQUIERDA
+
+X_LISTO:
+    clr r23
+    sbrs r21, 7
+    rjmp Y_POSITIVO
+    neg r21
+    ldi r23, CMD_ARRIBA
+    rjmp Y_LISTO
+
+Y_POSITIVO:
+    tst r21
+    breq Y_LISTO
+    ldi r23, CMD_ABAJO
+
+Y_LISTO:
+    ; Tomo el desplazamiento mas grande como cantidad de pasos
+    mov r26, r20
+    cp r26, r21
+    brsh MAX_LISTO
+    mov r26, r21
+
+MAX_LISTO:
+    tst r26
+    brne PREPARAR_DDA
+    ret
+
+PREPARAR_DDA:
+    mov r27, r26
+    clr r28
+    clr r29
+
+BUCLE_DDA:
+    clr r16
+
+    add r28, r20
+    cp r28, r26
+    brlo SIN_MOVIMIENTO_X
+    sub r28, r26
+    or r16, r22
+
+SIN_MOVIMIENTO_X:
+    add r29, r21
+    cp r29, r26
+    brlo SIN_MOVIMIENTO_Y
+    sub r29, r26
+    or r16, r23
+
+SIN_MOVIMIENTO_Y:
+    ldi r24, low(PASO_MS)
+    ldi r25, high(PASO_MS)
+    rcall PULSO_ESPERAR
+
+    lds r18, dibujo_abortado
+    tst r18
+    brne FIN_DDA
+
+    dec r27
+    brne BUCLE_DDA
+
+FIN_DDA:
+    ret
+
+; Cada orden de la tabla ocupa cuatro bytes
+EJECUTAR_TABLA:
+    clr r18
+    sts dibujo_abortado, r18
+
+SIGUIENTE_ORDEN:
+    lpm r16, Z+
+    lpm r20, Z+
+    lpm r21, Z+
+    adiw r30, 1
+
+    cpi r16, OP_FIN
+    breq FIN_TABLA
+    cpi r16, OP_LINEA
+    breq ORDEN_LINEA
+    cpi r16, OP_LAPIZ_ARRIBA
+    breq ORDEN_SUBIR
+    cpi r16, OP_LAPIZ_ABAJO
+    breq ORDEN_BAJAR
+    rjmp SIGUIENTE_ORDEN
+
+ORDEN_LINEA:
+    rcall MOVER_LINEA_DDA
+    rjmp COMPROBAR_ABORTO
+
+ORDEN_SUBIR:
+    ldi r16, CMD_SUBIR_LAPIZ
+    rjmp ORDEN_LAPIZ
+
+ORDEN_BAJAR:
+    ldi r16, CMD_BAJAR_LAPIZ
+
+ORDEN_LAPIZ:
+    ldi r24, low(PULSO_LAPIZ_MS)
+    ldi r25, high(PULSO_LAPIZ_MS)
+    rcall PULSO_ESPERAR
+
+COMPROBAR_ABORTO:
+    lds r18, dibujo_abortado
+    tst r18
+    brne FIN_TABLA
+    rjmp SIGUIENTE_ORDEN
+
+FIN_TABLA:
     ret
 
 ; Configuracion serie: 9600 baudios, 8 bits, sin paridad y 1 bit de parada
@@ -163,61 +311,114 @@ REVISAR_USART:
 
     lds r16, UDR0
 
-    cpi r16, 'B'
-    breq BAJAR_LAPIZ
-    cpi r16, 'U'
-    breq SUBIR_LAPIZ
-    cpi r16, 'W'
-    breq MOVER_ARRIBA
-    cpi r16, 'S'
-    breq MOVER_ABAJO
-    cpi r16, 'A'
-    breq MOVER_IZQUIERDA
-    cpi r16, 'D'
-    breq MOVER_DERECHA
-    cpi r16, 'X'
-    breq PARAR
+    cpi r16, '1'
+    brne PROBAR_2
+    rjmp DIBUJAR_TRIANGULO
+
+PROBAR_2:
+    cpi r16, '2'
+    brne PROBAR_3
+    rjmp DIBUJAR_CIRCULO
+
+PROBAR_3:
+    cpi r16, '3'
+    brne PROBAR_4
+    rjmp DIBUJAR_PENTAGRAMA
+
+PROBAR_4:
+    cpi r16, '4'
+    brne PROBAR_M
+    rjmp DIBUJAR_CUADRADO
+
+PROBAR_M:
     cpi r16, 'M'
-    breq VOLVER_A_MOSTRAR_MENU
+    brne PROBAR_M_MINUSCULA
+    rjmp VOLVER_A_MOSTRAR_MENU
+
+PROBAR_M_MINUSCULA:
+    cpi r16, 'm'
+    brne PROBAR_X
+    rjmp VOLVER_A_MOSTRAR_MENU
+
+PROBAR_X:
+    cpi r16, 'X'
+    brne PROBAR_X_MINUSCULA
+    rjmp PARAR
+
+PROBAR_X_MINUSCULA:
+    cpi r16, 'x'
+    brne PROBAR_FIN_LINEA
+    rjmp PARAR
+
+PROBAR_FIN_LINEA:
+    cpi r16, 13
+    breq FIN_ENTRADA
+    cpi r16, 10
+    breq FIN_ENTRADA
+
+    ldi r30, low(TEXTO_ERROR*2)
+    ldi r31, high(TEXTO_ERROR*2)
+    rcall ENVIAR_CADENA
+
+FIN_ENTRADA:
     ret
 
-BAJAR_LAPIZ:
-    ldi r16, CMD_BAJAR_LAPIZ
-    rjmp PULSO_LAPIZ
+DIBUJAR_TRIANGULO:
+    ldi r30, low(TEXTO_TRIANGULO*2)
+    ldi r31, high(TEXTO_TRIANGULO*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_TRIANGULO*2)
+    ldi r31, high(TABLA_TRIANGULO*2)
+    rjmp EJECUTAR_DIBUJO
 
-SUBIR_LAPIZ:
-    ldi r16, CMD_SUBIR_LAPIZ
+DIBUJAR_CIRCULO:
+    ldi r30, low(TEXTO_CIRCULO*2)
+    ldi r31, high(TEXTO_CIRCULO*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_CIRCULO*2)
+    ldi r31, high(TABLA_CIRCULO*2)
+    rjmp EJECUTAR_DIBUJO
 
-PULSO_LAPIZ:
-    ldi r24, low(PULSO_LAPIZ_MS)
-    ldi r25, high(PULSO_LAPIZ_MS)
-    rcall PULSO_ESPERAR
+DIBUJAR_PENTAGRAMA:
+    ldi r30, low(TEXTO_PENTAGRAMA*2)
+    ldi r31, high(TEXTO_PENTAGRAMA*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_PENTAGRAMA*2)
+    ldi r31, high(TABLA_PENTAGRAMA*2)
+    rjmp EJECUTAR_DIBUJO
+
+DIBUJAR_CUADRADO:
+    ldi r30, low(TEXTO_CUADRADO*2)
+    ldi r31, high(TEXTO_CUADRADO*2)
+    rcall ENVIAR_CADENA
+    ldi r30, low(TABLA_CUADRADO*2)
+    ldi r31, high(TABLA_CUADRADO*2)
+
+EJECUTAR_DIBUJO:
+    rcall EJECUTAR_TABLA
+
+    lds r18, dibujo_abortado
+    tst r18
+    brne MOSTRAR_ABORTADO
+
+    ldi r30, low(TEXTO_TERMINADO*2)
+    ldi r31, high(TEXTO_TERMINADO*2)
+    rcall ENVIAR_CADENA
+    rcall MOSTRAR_MENU
     ret
 
-MOVER_ARRIBA:
-    ldi r16, CMD_ARRIBA
-    rjmp PULSO_MOVIMIENTO
-
-MOVER_ABAJO:
-    ldi r16, CMD_ABAJO
-    rjmp PULSO_MOVIMIENTO
-
-MOVER_IZQUIERDA:
-    ldi r16, CMD_IZQUIERDA
-    rjmp PULSO_MOVIMIENTO
-
-MOVER_DERECHA:
-    ldi r16, CMD_DERECHA
-
-PULSO_MOVIMIENTO:
-    ; Con 1000 ms medimos 11,5 mm en X y 12 mm en Y
-    ldi r24, low(PULSO_MOV_MS)
-    ldi r25, high(PULSO_MOV_MS)
-    rcall PULSO_ESPERAR
+MOSTRAR_ABORTADO:
+    ldi r30, low(TEXTO_ABORTADO*2)
+    ldi r31, high(TEXTO_ABORTADO*2)
+    rcall ENVIAR_CADENA
+    rcall MOSTRAR_MENU
     ret
 
 PARAR:
     rcall DETENER_PLOTTER
+    ldi r30, low(TEXTO_DETENIDO*2)
+    ldi r31, high(TEXTO_DETENIDO*2)
+    rcall ENVIAR_CADENA
     ret
 
 VOLVER_A_MOSTRAR_MENU:
@@ -248,4 +449,95 @@ MOSTRAR_MENU:
     ret
 
 TEXTO_MENU:
-    .db 13,10,"PRUEBA MANUAL DEL PLOTTER",13,10,"B bajar lapiz | U subir lapiz",13,10,"W arriba | S abajo | A izquierda | D derecha",13,10,"X detener | M mostrar menu",13,10,"> ",0,0
+    .db 13,10,"PLOTTER - MENU DE FIGURAS",13,10,"Antes de dibujar use el RESET fisico.",13,10,"1 Triangulo | 2 Circulo | 3 Pentagrama | 4 Cuadrado",13,10,"M repetir menu | X abortar dibujo",13,10,"> ",0,0
+
+TEXTO_TRIANGULO:
+    .db 13,10,"Dibujando triangulo...",13,10,0,0
+TEXTO_CIRCULO:
+    .db 13,10,"Dibujando circulo...",13,10,0,0
+TEXTO_PENTAGRAMA:
+    .db 13,10,"Dibujando pentagrama...",13,10,0
+TEXTO_CUADRADO:
+    .db 13,10,"Dibujando cuadrado...",13,10,0
+TEXTO_TERMINADO:
+    .db 13,10,"Dibujo terminado.",13,10,0
+TEXTO_ABORTADO:
+    .db 13,10,"Dibujo abortado con X.",13,10,0,0
+TEXTO_DETENIDO:
+    .db 13,10,"Salidas detenidas.",13,10,0,0
+TEXTO_ERROR:
+    .db 13,10,"Opcion invalida. Use 1,2,3,4,M o X.",13,10,0
+
+; Los movimientos son relativos al punto actual
+; Cada linea guarda operacion, X, Y y un byte libre
+TABLA_TRIANGULO:
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x78, 0x32, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0xD5, 0x2B, 0
+    .db OP_LINEA, 0x56, 0x00, 0
+    .db OP_LINEA, 0xD5, 0xD5, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
+
+TABLA_CIRCULO:
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x78, 0x1F, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x08, 0x01, 0
+    .db OP_LINEA, 0x09, 0x02, 0
+    .db OP_LINEA, 0x07, 0x04, 0
+    .db OP_LINEA, 0x07, 0x05, 0
+    .db OP_LINEA, 0x05, 0x06, 0
+    .db OP_LINEA, 0x04, 0x08, 0
+    .db OP_LINEA, 0x03, 0x07, 0
+    .db OP_LINEA, 0x00, 0x09, 0
+    .db OP_LINEA, 0x00, 0x08, 0
+    .db OP_LINEA, 0xFD, 0x07, 0
+    .db OP_LINEA, 0xFC, 0x08, 0
+    .db OP_LINEA, 0xFB, 0x06, 0
+    .db OP_LINEA, 0xF9, 0x05, 0
+    .db OP_LINEA, 0xF9, 0x04, 0
+    .db OP_LINEA, 0xF7, 0x02, 0
+    .db OP_LINEA, 0xF8, 0x01, 0
+    .db OP_LINEA, 0xF8, 0xFF, 0
+    .db OP_LINEA, 0xF7, 0xFE, 0
+    .db OP_LINEA, 0xF9, 0xFC, 0
+    .db OP_LINEA, 0xF9, 0xFB, 0
+    .db OP_LINEA, 0xFB, 0xFA, 0
+    .db OP_LINEA, 0xFC, 0xF8, 0
+    .db OP_LINEA, 0xFD, 0xF9, 0
+    .db OP_LINEA, 0x00, 0xF8, 0
+    .db OP_LINEA, 0x00, 0xF7, 0
+    .db OP_LINEA, 0x03, 0xF9, 0
+    .db OP_LINEA, 0x04, 0xF8, 0
+    .db OP_LINEA, 0x05, 0xFA, 0
+    .db OP_LINEA, 0x07, 0xFB, 0
+    .db OP_LINEA, 0x07, 0xFC, 0
+    .db OP_LINEA, 0x09, 0xFE, 0
+    .db OP_LINEA, 0x08, 0xFF, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
+
+TABLA_PENTAGRAMA:
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x78, 0x12, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0xDA, 0x4B, 0
+    .db OP_LINEA, 0x52, 0xD2, 0
+    .db OP_LINEA, 0xA8, 0x00, 0
+    .db OP_LINEA, 0x52, 0x2E, 0
+    .db OP_LINEA, 0xDA, 0xB5, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
+
+TABLA_CUADRADO:
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_LINEA, 0x4D, 0x1F, 0
+    .db OP_LAPIZ_ABAJO, 0x00, 0x00, 0
+    .db OP_LINEA, 0x56, 0x00, 0
+    .db OP_LINEA, 0x00, 0x53, 0
+    .db OP_LINEA, 0xAA, 0x00, 0
+    .db OP_LINEA, 0x00, 0xAD, 0
+    .db OP_LAPIZ_ARRIBA, 0x00, 0x00, 0
+    .db OP_FIN, 0, 0, 0
