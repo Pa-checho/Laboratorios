@@ -93,9 +93,38 @@ REVISAR_SERIAL:
     cpi r16, '9'
     breq CARGAR_S9
 
+    cpi r16, 'a'
+    breq FRECUENCIA_BAJA
+
+    cpi r16, 'b'
+    breq FRECUENCIA_MEDIA
+
+    cpi r16, 'c'
+    breq FRECUENCIA_ALTA
+
     ; Ignorar otros datos
     rjmp BUCLE_PRINCIPA
 
+FRECUENCIA_BAJA:
+    ldi r16, 249
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
+
+FRECUENCIA_MEDIA:
+    ldi r16, 124
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
+
+FRECUENCIA_ALTA:
+    ldi r16, 49
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
 
 RECARGAR_1:
     ldi ZL, LOW(SENAL_1 * 2)      ;Carga parte baja del contador
