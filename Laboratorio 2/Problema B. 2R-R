@@ -35,7 +35,7 @@ INICIO:
     ldi r16, 249       ;Contar hasta 249
     out OCR0A, r16
 
-    rjmp RECARGA_1
+    rjmp RECARGAR_1
 
 BUCLE_PRINCIPAL:
 
@@ -88,10 +88,10 @@ REVISAR_SERIAL:
 
     ; Seleccionar señal
     cpi r16, '1'
-    breq CARGAR_S1
+    breq RECARGAR_1
 
     cpi r16, '9'
-    breq CARGAR_S9
+    breq RECARGAR_9
 
     cpi r16, 'a'
     breq FRECUENCIA_BAJA
@@ -103,7 +103,7 @@ REVISAR_SERIAL:
     breq FRECUENCIA_ALTA
 
     ; Ignorar otros datos
-    rjmp BUCLE_PRINCIPA
+    rjmp BUCLE_PRINCIPAL
 
 FRECUENCIA_BAJA:
     ldi r16, 249

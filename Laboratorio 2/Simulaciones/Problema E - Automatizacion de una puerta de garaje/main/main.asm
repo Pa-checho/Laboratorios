@@ -88,7 +88,7 @@ eventos:    .byte 1
 
 
 
- vRESET:
+ RESET:
     ldi r16, high(RAMEND)
     out SPH, r16
     ldi r16, low(RAMEND)

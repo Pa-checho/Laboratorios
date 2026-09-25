@@ -58,8 +58,6 @@ BUCLE_PRINCIPAL:
     in r16, TIFR0             ;Leer registro de banderas del timer
     sbrs r16, OCF0A           ;La bandera de tiempo dice 1
     rjmp REVISAR_SERIAL       ;No -> saltar a revisar el teclado
-
-    ;Si el código llega aca, Si pasó 1 milisegundo
     ;Bajar la bandera del timer (escribiéndole un 1)
     ldi r16, (1<<OCF0A)
     out TIFR0, r16
@@ -107,10 +105,40 @@ REVISAR_SERIAL:
     cpi r16, '9'
     breq CARGAR_S9            ;Si es '9', cambiar a Señal 9
 
+    cpi r16, 'a'
+    breq FRECUENCIA_BAJA
+
+    cpi r16, 'b'
+    breq FRECUENCIA_MEDIA
+
+    cpi r16, 'c'
+    breq FRECUENCIA_ALTA
+
     ;Si presiona otra tecla, la ignora
     rjmp BUCLE_PRINCIPAL
 
 
+
+FRECUENCIA_BAJA:
+    ldi r16, 249
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
+
+FRECUENCIA_MEDIA:
+    ldi r16, 124
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
+
+FRECUENCIA_ALTA:
+    ldi r16, 49
+    out OCR0A, r16
+    ldi r16, (1<<OCF0A)
+    out TIFR0, r16
+    rjmp BUCLE_PRINCIPAL
 
 ;DATOS EN MEMORIA FLASH
 

@@ -134,7 +134,7 @@ esperar_rx:
     cpi r17, 6
     breq led6
     cpi r17, 7
-    breq led
+    breq led7
 
     rjmp esperar_rx
 
