@@ -11,15 +11,245 @@
 #include <stdint.h>
 
 /*
-  Laboratorio 3 - Problema D: piano con Arduino Uno, a 16 MHz.
-  Botones a GND: Do D2, Re D3, Mi D4, Fa D5, Sol D6, La D7, Si D8, Do agudo D10.
-  Buzzers pasivos con transistores: D9 y D11.
-  Timer0 lleva el tiempo; Timer1 y Timer2 generan los dos sonidos.
-  Programa en C con main() propio.
+  ARDUINO UNO - ATmega328P - 16 MHz
+
+  Pulsadores conectados a GND:
+  Do: D2
+  Re: D3
+  Mi: D4
+  Fa: D5
+  Sol: D6
+  La: D7
+  Si: D8
+  Do agudo: D10
+
+  Buzzers mediante transistores:
+  Buzzer 1: D9
+  Buzzer 2: D11
+
+  LCD 16x2 con modulo I2C PCF8574:
+  GND = GND
+  VCC = 5V
+  SDA = A4 (PC4 / SDA)
+  SCL = A5 (PC5 / SCL)
+
+  Direccion I2C asumida: 0x27
+  Mapeo PCF8574 asumido:
+  P0=RS, P1=RW, P2=E, P3=Backlight, P4-P7=D4-D7
+
+  Monitor Serie: 9600 baudios.
+
+  C1: Megalovania
+  C2: Dragonborn
+  C3: Bloody Tears
+  C4: Game of Thrones
+  P: detener y volver al piano
+
+  Programa con main() propio.
 */
 
 #define SIN_NOTA 255u
 #define SILENCIO 0u
+#define SOSTENER 255u
+
+#define C1_PASO_MS 125u
+#define C1_PASOS 160u
+
+#define C2_PASOS 144u
+#define C2_PASO_MS 125u
+
+#define C3_PASOS 256u
+#define C3_PASO_MS 125u
+
+#define C4_PASOS 552u
+#define C4_PASO_MS 176u
+
+/*
+  Cada pareja contiene las notas de los dos buzzers.
+  0: silencio.
+  255: prolongar la nota anterior.
+  Otros valores: notas MIDI.
+*/
+
+// C4: Game of Thrones.
+// 92 compases, aproximadamente 170 BPM.
+// Segunda voz en los compases 73 a 88.
+static const uint8_t cancion_c4[C4_PASOS][2] PROGMEM = {
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 1
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 2
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 3
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 4
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 5
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 6
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 7
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 8
+    {69,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 9
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 10
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 11
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 12
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 13
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 14
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 15
+    {64,0},{255,0},{57,0},{255,0},{60,0},{255,0}, // 16
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 17
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 18
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 19
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 20
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 21
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 22
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 23
+    {62,0},{255,0},{55,0},{255,0},{0,0},{0,0}, // 24
+    {69,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 25
+    {62,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 26
+    {65,0},{67,0},{69,0},{255,0},{255,0},{255,0}, // 27
+    {62,0},{255,0},{255,0},{255,0},{65,0},{67,0}, // 28
+    {64,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 29
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 30
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 31
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 32
+    {67,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 33
+    {60,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 34
+    {65,0},{64,0},{67,0},{255,0},{255,0},{255,0}, // 35
+    {60,0},{255,0},{255,0},{255,0},{65,0},{64,0}, // 36
+    {62,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 37
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 38
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 39
+    {255,0},{255,0},{69,0},{255,0},{74,0},{255,0}, // 40
+    {81,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 41
+    {74,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 42
+    {77,0},{79,0},{81,0},{255,0},{255,0},{255,0}, // 43
+    {74,0},{255,0},{255,0},{255,0},{77,0},{79,0}, // 44
+    {76,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 45
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 46
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 47
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 48
+    {79,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 49
+    {72,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 50
+    {76,0},{255,0},{255,0},{77,0},{255,0},{255,0}, // 51
+    {76,0},{255,0},{255,0},{72,0},{255,0},{255,0}, // 52
+    {74,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 53
+    {255,0},{255,0},{255,0},{255,0},{82,0},{84,0}, // 54
+    {86,0},{255,0},{81,0},{255,0},{82,0},{84,0}, // 55
+    {86,0},{255,0},{81,0},{255,0},{82,0},{84,0}, // 56
+    {74,0},{255,0},{65,0},{255,0},{69,0},{70,0}, // 57
+    {74,0},{255,0},{65,0},{255,0},{72,0},{74,0}, // 58
+    {72,0},{255,0},{65,0},{255,0},{69,0},{70,0}, // 59
+    {72,0},{255,0},{65,0},{255,0},{69,0},{255,0}, // 60
+    {70,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 61
+    {70,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 62
+    {69,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 63
+    {69,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 64
+    {65,0},{255,0},{58,0},{255,0},{62,0},{64,0}, // 65
+    {65,0},{255,0},{58,0},{255,0},{64,0},{65,0}, // 66
+    {65,0},{255,0},{58,0},{255,0},{65,0},{255,0}, // 67
+    {67,0},{255,0},{60,0},{255,0},{67,0},{255,0}, // 68
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 69
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 70
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 71
+    {62,0},{255,0},{255,0},{255,0},{0,0},{0,0}, // 72
+    {86,74},{255,255},{255,255},{255,255},{255,255},{255,255}, // 73
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 74
+    {84,72},{255,255},{255,255},{255,255},{255,255},{255,255}, // 75
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 76
+    {82,70},{74,62},{255,255},{255,255},{255,255},{255,255}, // 77
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 78
+    {81,69},{255,255},{255,255},{255,255},{255,255},{255,255}, // 79
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 80
+    {70,58},{255,255},{255,255},{255,255},{255,255},{255,255}, // 81
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 82
+    {77,65},{255,255},{255,255},{255,255},{255,255},{255,255}, // 83
+    {76,64},{255,255},{255,255},{255,255},{255,255},{255,255}, // 84
+    {74,62},{255,255},{255,255},{255,255},{82,70},{84,72}, // 85
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 86
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 87
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 88
+    {0,0},{0,0},{0,0},{0,0},{70,0},{72,0}, // 89
+    {74,0},{255,0},{69,0},{255,0},{70,0},{72,0}, // 90
+    {74,0},{255,0},{69,0},{255,0},{70,0},{72,0}, // 91
+    {74,0},{255,0},{255,0},{255,0},{0,0},{0,0} // 92
+};
+
+// C1: Megalovania.
+static const uint8_t cancion_c1[C1_PASOS][2] PROGMEM = {
+    {0,50},{0,50},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,48},{0,48},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,47},{0,47},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,46},{0,46},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,38},{0,50},{62,38},{0,255},{57,38},{0,38},{0,0},{56,38},
+    {0,0},{55,38},{0,0},{53,38},{255,38},{50,38},{53,38},{55,255},
+    {0,36},{0,48},{62,36},{0,255},{57,36},{0,36},{0,0},{56,36},
+    {0,0},{55,36},{0,0},{53,36},{255,36},{50,36},{53,36},{55,255},
+    {0,35},{0,47},{62,35},{0,255},{57,35},{0,35},{0,0},{56,35},
+    {0,0},{55,35},{0,0},{53,35},{255,35},{50,35},{53,35},{55,255},
+    {0,34},{0,46},{62,34},{0,255},{57,34},{0,34},{0,0},{56,34},
+    {0,0},{55,36},{0,0},{53,36},{255,36},{50,36},{53,36},{55,255},
+    {62,26},{62,255},{74,26},{0,255},{69,26},{0,26},{0,0},{68,26},
+    {0,0},{67,26},{0,0},{65,26},{255,26},{62,255},{65,26},{67,255},
+    {60,24},{60,255},{74,24},{0,255},{69,24},{0,24},{0,0},{68,24},
+    {0,0},{67,24},{0,0},{65,24},{255,24},{62,255},{65,24},{67,255}
+};
+
+// C2: Dragonborn.
+static const uint8_t cancion_c2[C2_PASOS][2] PROGMEM = {
+    {86,47},{255,255},{255,255},{255,47},{85,255},{255,255},{255,47},{255,255},
+    {83,255},{255,255},{255,47},{255,255},{81,43},{255,255},{255,255},{255,43},
+    {79,255},{255,255},{255,43},{255,255},{78,255},{255,255},{255,43},{255,255},
+    {76,40},{255,255},{255,255},{255,40},{255,40},{255,255},{255,40},{255,255},
+    {74,40},{255,255},{78,40},{255,255},{76,33},{255,255},{255,255},{255,33},
+    {255,33},{255,255},{255,33},{255,255},{255,33},{255,255},{86,33},{85,255},
+    {86,47},{255,255},{255,35},{255,255},{86,255},{85,255},{86,47},{255,255},
+    {255,35},{255,255},{86,255},{85,255},{88,45},{255,255},{86,33},{255,255},
+    {85,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{81,255},
+    {83,43},{255,255},{255,31},{255,255},{83,255},{81,255},{83,40},{255,255},
+    {255,28},{255,255},{81,255},{83,255},{85,45},{255,255},{86,33},{255,255},
+    {81,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{85,255},
+    {86,47},{255,255},{86,35},{255,255},{86,255},{88,255},{90,43},{255,255},
+    {255,31},{255,255},{85,255},{86,255},{88,45},{255,255},{86,33},{255,255},
+    {85,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{81,255},
+    {83,43},{255,255},{255,31},{255,255},{83,255},{81,255},{83,40},{255,255},
+    {255,28},{255,255},{81,255},{83,255},{85,45},{255,255},{86,33},{255,255},
+    {81,255},{255,255},{83,47},{255,255},{255,255},{255,255},{255,47},{255,255}
+};
+
+// C3: Bloody Tears.
+static const uint8_t cancion_c3[C3_PASOS][2] PROGMEM = {
+    {70,46},{65,255},{77,255},{65,255},{75,53},{65,255},{73,255},{65,255},
+    {72,46},{65,255},{73,255},{65,255},{72,53},{65,255},{70,255},{65,255},
+    {72,41},{65,255},{73,255},{65,255},{75,48},{65,255},{73,255},{65,255},
+    {72,41},{65,255},{68,255},{65,255},{72,48},{65,255},{70,255},{65,255},
+    {70,46},{65,255},{77,255},{65,255},{75,53},{65,255},{73,255},{65,255},
+    {72,46},{65,255},{73,255},{65,255},{72,53},{65,255},{70,255},{65,255},
+    {72,41},{65,255},{73,255},{65,255},{75,48},{65,255},{73,255},{65,255},
+    {72,41},{65,255},{68,255},{65,255},{72,48},{65,255},{70,255},{65,255},
+    {75,46},{255,255},{80,255},{77,255},{255,53},{60,255},{58,255},{60,255},
+    {61,46},{255,255},{63,255},{255,255},{75,53},{255,255},{73,255},{255,255},
+    {75,44},{255,255},{255,255},{80,255},{255,51},{255,255},{77,255},{255,255},
+    {255,44},{255,255},{255,255},{255,255},{75,51},{255,255},{73,255},{255,255},
+    {75,42},{255,255},{80,255},{77,255},{255,49},{63,255},{61,255},{63,255},
+    {65,42},{255,255},{66,255},{255,255},{75,49},{255,255},{77,255},{255,255},
+    {78,41},{255,255},{255,255},{80,255},{255,48},{255,255},{255,255},{255,255},
+    {77,41},{255,255},{255,255},{78,255},{255,48},{255,255},{255,255},{255,255},
+    {75,46},{255,255},{80,255},{77,255},{255,53},{60,255},{58,255},{60,255},
+    {61,46},{255,255},{63,255},{255,255},{75,53},{255,255},{73,255},{255,255},
+    {75,44},{255,255},{255,255},{80,255},{255,51},{255,255},{77,255},{255,255},
+    {255,44},{255,255},{255,255},{255,255},{75,51},{255,255},{73,255},{255,255},
+    {75,42},{255,255},{80,255},{77,255},{255,49},{63,255},{61,255},{63,255},
+    {65,42},{255,255},{66,255},{255,255},{75,49},{255,255},{77,255},{255,255},
+    {78,41},{255,255},{255,255},{80,255},{255,48},{255,255},{255,255},{255,255},
+    {77,41},{255,255},{79,255},{70,255},{81,48},{255,255},{84,255},{255,255},
+    {72,46},{255,255},{255,255},{70,255},{255,53},{255,255},{82,255},{255,255},
+    {72,44},{255,255},{255,255},{70,255},{255,51},{255,255},{82,255},{255,255},
+    {72,42},{255,255},{255,255},{70,255},{255,49},{255,255},{82,255},{255,255},
+    {73,44},{85,255},{72,255},{84,255},{70,51},{82,255},{68,255},{80,255},
+    {72,46},{255,255},{70,255},{82,255},{255,53},{255,255},{255,255},{255,255},
+    {72,44},{255,255},{70,255},{82,255},{255,51},{255,255},{255,255},{255,255},
+    {72,42},{255,255},{70,255},{82,255},{255,49},{255,255},{255,255},{255,255},
+    {85,44},{255,255},{87,255},{255,255},{84,51},{85,255},{0,0},{0,0}
+};
 
 // Valores de comparacion para las notas MIDI 24 a 96.
 // Se guardan en Flash con PROGMEM para no ocupar la RAM con las tablas.
@@ -204,8 +434,30 @@ static void mostrar_teclas_lcd(uint8_t nota1, uint8_t nota2)
     }
 }
 
+// ================= VARIABLES =================
+
 // La interrupcion del Timer0 suma 4 ms. volatile permite ver sus cambios.
 static volatile uint32_t reloj_ms;
+
+// Guardo los caracteres que llegan mientras el programa atiende otras tareas.
+// Es una cola circular de 64 posiciones; se pueden guardar hasta 63 caracteres.
+static volatile uint8_t datos_recibidos[64];
+static volatile uint8_t posicion_escritura;
+static volatile uint8_t posicion_lectura;
+static volatile uint8_t error_recepcion;
+
+static uint8_t cancion_actual;
+static uint8_t esperando_numero_cancion;
+static uint16_t paso_actual;
+static uint16_t total_pasos;
+static uint16_t duracion_paso_ms;
+static uint8_t vueltas_restantes;
+
+static const uint8_t (*partitura)[2];
+
+static uint8_t buzzer_sonando[2];
+static uint32_t tiempo_proximo_paso;
+static uint32_t tiempo_fin_nota[2];
 
 static uint8_t nota_anterior_buzzer1 = SIN_NOTA;
 static uint8_t nota_anterior_buzzer2 = SIN_NOTA;
@@ -248,6 +500,21 @@ ISR(TIMER0_COMPA_vect)
     reloj_ms += 4;
 }
 
+ISR(USART_RX_vect)
+{
+    uint8_t estado = UCSR0A;
+    uint8_t dato = UDR0;
+    uint8_t siguiente = (uint8_t)((posicion_escritura + 1u) & 63u);
+
+    if ((estado & (_BV(FE0) | _BV(DOR0) | _BV(UPE0))) ||
+        siguiente == posicion_lectura) {
+        error_recepcion = 1;
+    } else {
+        datos_recibidos[posicion_escritura] = dato;
+        posicion_escritura = siguiente;
+    }
+}
+
 static uint32_t leer_reloj_ms(void)
 {
     uint32_t valor;
@@ -258,6 +525,33 @@ static uint32_t leer_reloj_ms(void)
     }
 
     return valor;
+}
+
+static uint8_t se_cumplio_tiempo(uint32_t ahora, uint32_t plazo)
+{
+    return (int32_t)(ahora - plazo) >= 0;
+}
+
+// ================= UART =================
+
+static void enviar_texto_uart(const char *texto)
+{
+    while (*texto) {
+        while (!(UCSR0A & _BV(UDRE0))) {
+        }
+
+        UDR0 = (uint8_t)*texto++;
+    }
+}
+
+static void iniciar_uart(void)
+{
+    UCSR0A = 0;
+    UBRR0H = 0;
+    UBRR0L = 103;
+
+    UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
+    UCSR0B = _BV(RXEN0) | _BV(TXEN0) | _BV(RXCIE0);
 }
 
 // ================= BUZZERS =================
@@ -307,6 +601,183 @@ static void apagar_buzzers(void)
 {
     poner_nota(0, SILENCIO);
     poner_nota(1, SILENCIO);
+    buzzer_sonando[0] = buzzer_sonando[1] = 0;
+}
+
+// ================= MODOS =================
+
+static void volver_al_piano(void)
+{
+    cancion_actual = 0;
+    apagar_buzzers();
+
+    nota_anterior_buzzer1 = nota_anterior_buzzer2 = SIN_NOTA;
+    lectura_pendiente = teclas_estables = 0;
+    teclas_en_rebote = 1;
+    tiempo_ultimo_cambio = leer_reloj_ms();
+    cambio_teclas = 1;
+
+    arrancar_reloj();
+    mostrar_teclas_lcd(SIN_NOTA, SIN_NOTA);
+}
+
+static void iniciar_cancion(uint8_t numero)
+{
+    apagar_buzzers();
+    vueltas_restantes = 1;
+
+    if (numero == 1) {
+        partitura = cancion_c1;
+        total_pasos = C1_PASOS;
+        duracion_paso_ms = C1_PASO_MS;
+
+        escribir_linea_lcd(0, "C1: Megalovania");
+        enviar_texto_uart(
+            "\r\nC1: Megalovania (20 s). P: detener.\r\n"
+        );
+
+    } else if (numero == 2) {
+        partitura = cancion_c2;
+        total_pasos = C2_PASOS;
+        duracion_paso_ms = C2_PASO_MS;
+
+        escribir_linea_lcd(0, "C2: Dragonborn");
+        enviar_texto_uart(
+            "\r\nC2: Dragonborn (18 s, 120 BPM). P: detener.\r\n"
+        );
+    }
+
+    if (numero == 3) {
+        partitura = cancion_c3;
+        total_pasos = C3_PASOS;
+        duracion_paso_ms = C3_PASO_MS;
+        vueltas_restantes = 2;
+
+        escribir_linea_lcd(0, "C3: Bloody Tears");
+        enviar_texto_uart(
+            "\r\nC3: Bloody Tears (64 s, 120 BPM). P: detener.\r\n"
+        );
+    }
+
+    if (numero == 4) {
+        partitura = cancion_c4;
+        total_pasos = C4_PASOS;
+        duracion_paso_ms = C4_PASO_MS;
+
+        escribir_linea_lcd(0, "C4: Game Thrones");
+        enviar_texto_uart(
+            "\r\nC4: Game of Thrones (97 s, 170 BPM). P: detener.\r\n"
+        );
+    }
+
+    escribir_linea_lcd(1, "P: volver piano");
+    paso_actual = 0;
+    arrancar_reloj();
+    tiempo_proximo_paso = leer_reloj_ms();
+    cancion_actual = numero;
+}
+
+static void recibir_comandos(void)
+{
+    if (error_recepcion) {
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            posicion_lectura = posicion_escritura;
+            error_recepcion = 0;
+        }
+
+        esperando_numero_cancion = 0;
+        enviar_texto_uart("\r\nError UART. Reenviar comando.\r\n");
+    }
+
+    while (posicion_lectura != posicion_escritura) {
+        uint8_t caracter = datos_recibidos[posicion_lectura];
+        posicion_lectura = (uint8_t)((posicion_lectura + 1u) & 63u);
+
+        if (caracter >= 'a' && caracter <= 'z')
+            caracter = (uint8_t)(caracter - 'a' + 'A');
+
+        if (caracter == '\r' || caracter == '\n') {
+            esperando_numero_cancion = 0;
+            continue;
+        }
+
+        if (caracter == ' ' || caracter == '\t')
+            continue;
+
+        if (caracter == 'P') {
+            esperando_numero_cancion = 0;
+            volver_al_piano();
+            enviar_texto_uart("\r\nModo piano.\r\n");
+
+        } else if (caracter == 'C') {
+            esperando_numero_cancion = 1;
+
+        } else if (esperando_numero_cancion && caracter >= '1' && caracter <= '4') {
+            esperando_numero_cancion = 0;
+            iniciar_cancion((uint8_t)(caracter - '0'));
+
+        } else {
+            esperando_numero_cancion = 0;
+            enviar_texto_uart("\r\nComandos: C1, C2, C3, C4, P.\r\n");
+        }
+    }
+}
+
+// ================= REPRODUCCION =================
+
+static void actualizar_cancion(uint32_t ahora)
+{
+    while (cancion_actual && se_cumplio_tiempo(ahora, tiempo_proximo_paso)) {
+        if (paso_actual >= total_pasos) {
+            if (vueltas_restantes > 1) {
+                --vueltas_restantes;
+                paso_actual = 0;
+            } else {
+                volver_al_piano();
+                enviar_texto_uart("\r\nFin de cancion. Modo piano.\r\n");
+                return;
+            }
+        }
+
+        for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
+            uint8_t nota =
+                pgm_read_byte(&partitura[paso_actual][buzzer]);
+
+            if (nota == SOSTENER)
+                continue;
+
+            poner_nota(buzzer, nota);
+            buzzer_sonando[buzzer] = nota != SILENCIO;
+
+            if (buzzer_sonando[buzzer]) {
+                uint16_t duracion = 1;
+
+                while (
+                    paso_actual + duracion < total_pasos &&
+                    pgm_read_byte(
+                        &partitura[paso_actual + duracion][buzzer]
+                    ) == SOSTENER
+                ) {
+                    ++duracion;
+                }
+
+                // Dejo 12 ms de separacion al final, incluso si la nota se prolonga.
+                tiempo_fin_nota[buzzer] =
+                    tiempo_proximo_paso +
+                    (uint32_t)duracion * duracion_paso_ms - 12u;
+            }
+        }
+
+        ++paso_actual;
+        tiempo_proximo_paso += duracion_paso_ms;
+    }
+
+    for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
+        if (buzzer_sonando[buzzer] && se_cumplio_tiempo(ahora, tiempo_fin_nota[buzzer])) {
+            poner_nota(buzzer, SILENCIO);
+            buzzer_sonando[buzzer] = 0;
+        }
+    }
 }
 
 // ================= TECLADO =================
@@ -331,6 +802,9 @@ static uint8_t leer_teclas(void)
 
 static void actualizar_teclado(uint32_t ahora)
 {
+    if (cancion_actual)
+        return;
+
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         cambio_teclas = 0;
     }
@@ -391,6 +865,7 @@ static void mantener_reloj_activo(void)
     arrancar_reloj();
 }
 
+// ================= PROGRAMA PRINCIPAL =================
 
 int main(void)
 {
@@ -408,9 +883,9 @@ int main(void)
     DDRB |= _BV(PB1) | _BV(PB3);
 
     apagar_buzzers();
-    // Modulo PCF8574: SDA en A4, SCL en A5, direccion 0x27.
     iniciar_lcd();
-    mostrar_teclas_lcd(SIN_NOTA, SIN_NOTA);
+    iniciar_uart();
+
     // Timer0: interrupcion cada 4 ms.
     TCCR0A = _BV(WGM01);
     OCR0A = 249;
@@ -423,18 +898,38 @@ int main(void)
     PCIFR = _BV(PCIF0) | _BV(PCIF2);
     PCICR = _BV(PCIE0) | _BV(PCIE2);
 
-    arrancar_reloj();
+    volver_al_piano();
     set_sleep_mode(SLEEP_MODE_IDLE);
     sei();
 
+    enviar_texto_uart(
+        "\r\nPiano listo. 9600 baudios.\r\n"
+        "C1: Megalovania; C2: Dragonborn; "
+        "C3: Bloody Tears; C4: Game of Thrones; P: piano.\r\n"
+    );
+
     for (;;) {
+        recibir_comandos();
+
+        uint32_t ahora = leer_reloj_ms();
+
+        if (cancion_actual)
+            actualizar_cancion(ahora);
+
         actualizar_teclado(leer_reloj_ms());
-        // El Timer0 despierta al micro cada 4 ms y el sonido sigue por hardware.
+
         cli();
+
+        // El reloj sigue activo para revisar los botones cada 4 ms.
         mantener_reloj_activo();
-        sleep_enable();
-        sei();
-        sleep_cpu();
-        sleep_disable();
+
+        if (posicion_lectura != posicion_escritura || error_recepcion) {
+            sei();
+        } else {
+            sleep_enable();
+            sei();
+            sleep_cpu();
+            sleep_disable();
+        }
     }
 }
