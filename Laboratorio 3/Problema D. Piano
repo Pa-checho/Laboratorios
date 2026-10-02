@@ -1,0 +1,280 @@
+#ifndef F_CPU
+#define F_CPU 16000000UL
+#endif
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/sleep.h>
+#include <avr/pgmspace.h>
+#include <util/atomic.h>
+#include <util/delay.h>
+#include <stdint.h>
+
+/*
+  Laboratorio 3 - Problema D: piano con Arduino Uno, a 16 MHz.
+  Botones a GND: Do D2, Re D3, Mi D4, Fa D5, Sol D6, La D7, Si D8, Do agudo D10.
+  Buzzers pasivos con transistores: D9 y D11.
+  Timer0 lleva el tiempo; Timer1 y Timer2 generan los dos sonidos.
+  Programa en C con main() propio.
+*/
+
+#define SIN_NOTA 255u
+#define SILENCIO 0u
+
+// Valores de comparacion para las notas MIDI 24 a 96.
+// Se guardan en Flash con PROGMEM para no ocupar la RAM con las tablas.
+// La frecuencia se obtiene con F_CPU / (2 * divisor * (OCR + 1)).
+static const uint16_t comparacion_timer1[73] PROGMEM = {
+    30577,28861,27241,25712,24269,22906,21621,20408,19262,18181,17160,16197,
+    15288,14430,13620,12855,12134,11453,10810,10203,9630,9090,8580,8098,
+    7644,7214,6810,6427,6066,5726,5404,5101,4815,4544,4289,4049,
+    3821,3607,3404,3213,3033,2862,2702,2550,2407,2272,2144,2024,
+    1910,1803,1702,1606,1516,1431,1350,1275,1203,1135,1072,1011,
+    955,901,850,803,757,715,675,637,601,567,535,505,477
+};
+
+static const uint8_t comparacion_timer2[73] PROGMEM = {
+    238,224,212,200,189,178,168,158,149,141,133,126,
+    118,112,105,99,94,88,83,79,74,70,66,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,126,118
+};
+
+static const uint8_t divisor_timer2[73] PROGMEM = {
+    7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,6,
+    6,6,6,6,6,6,6,6,6,6,6,5,
+    5,5,5,5,5,5,5,5,5,5,5,4,
+    4,4,4,4,4,4,4,4,4,4,4,3,
+    3,3,3,3,3,3,3,3,3,3,3,3,3
+};
+
+// La interrupcion del Timer0 suma 4 ms. volatile permite ver sus cambios.
+static volatile uint32_t reloj_ms;
+
+static uint8_t nota_anterior_buzzer1 = SIN_NOTA;
+static uint8_t nota_anterior_buzzer2 = SIN_NOTA;
+
+static volatile uint8_t cambio_teclas = 1;
+static uint8_t lectura_pendiente;
+static uint8_t teclas_estables;
+static uint8_t teclas_en_rebote = 1;
+static uint32_t tiempo_ultimo_cambio;
+
+// ================= RELOJ =================
+
+static void arrancar_reloj(void)
+{
+    if (TCCR0B == 0) {
+        TCNT0 = 0;
+        TIFR0 = _BV(OCF0A);
+        TCCR0B = _BV(CS02);
+    }
+}
+
+static void cambio_en_teclas(void)
+{
+    cambio_teclas = 1;
+    arrancar_reloj();
+}
+
+ISR(PCINT0_vect)
+{
+    cambio_en_teclas();
+}
+
+ISR(PCINT2_vect)
+{
+    cambio_en_teclas();
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+    reloj_ms += 4;
+}
+
+static uint32_t leer_reloj_ms(void)
+{
+    uint32_t valor;
+
+    // El micro es de 8 bits y el reloj ocupa 32: lo leo sin interrupciones.
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        valor = reloj_ms;
+    }
+
+    return valor;
+}
+
+// ================= BUZZERS =================
+
+// Buzzer 0: Timer1 y D9. Buzzer 1: Timer2 y D11.
+// Los timers cambian las salidas por hardware; no genero el sonido con delays.
+static void poner_nota(uint8_t buzzer, uint8_t nota_midi)
+{
+    uint8_t nota_valida = nota_midi >= 24 && nota_midi <= 96;
+    uint8_t indice = nota_valida ? (uint8_t)(nota_midi - 24) : 0;
+
+    if (buzzer == 0) {
+        uint16_t valor =
+            nota_valida ? pgm_read_word(&comparacion_timer1[indice]) : 0;
+
+        TCCR1B = 0;
+        TCCR1A = 0;
+        PORTB &= (uint8_t)~_BV(PB1);
+        TCNT1 = 0;
+
+        if (nota_valida) {
+            OCR1A = valor;
+            TCCR1A = _BV(COM1A0);
+            TCCR1B = _BV(WGM12) | _BV(CS11);
+        }
+    } else {
+        uint8_t valor =
+            nota_valida ? pgm_read_byte(&comparacion_timer2[indice]) : 0;
+
+        uint8_t prescaler =
+            nota_valida ? pgm_read_byte(&divisor_timer2[indice]) : 0;
+
+        TCCR2B = 0;
+        TCCR2A = 0;
+        PORTB &= (uint8_t)~_BV(PB3);
+        TCNT2 = 0;
+
+        if (nota_valida) {
+            OCR2A = valor;
+            TCCR2A = _BV(WGM21) | _BV(COM2A0);
+            TCCR2B = prescaler;
+        }
+    }
+}
+
+static void apagar_buzzers(void)
+{
+    poner_nota(0, SILENCIO);
+    poner_nota(1, SILENCIO);
+}
+
+// ================= TECLADO =================
+
+static uint8_t leer_teclas(void)
+{
+    // Con pull-up, un boton presionado se lee como 0. Invierto para trabajar con 1.
+    uint8_t pulsadores_puerto_d = (uint8_t)~PIND;
+    uint8_t pulsadores_puerto_b = (uint8_t)~PINB;
+
+    // Bits 0 a 5: D2 a D7. Despues agrego Si y Do agudo en los bits 6 y 7.
+    uint8_t teclas = (uint8_t)((pulsadores_puerto_d >> 2) & 0x3Fu);
+
+    if (pulsadores_puerto_b & _BV(PB0))
+        teclas |= _BV(6);
+
+    if (pulsadores_puerto_b & _BV(PB2))
+        teclas |= _BV(7);
+
+    return teclas;
+}
+
+static void actualizar_teclado(uint32_t ahora)
+{
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        cambio_teclas = 0;
+    }
+
+    // Lectura continua: no depende de PCINT.
+    uint8_t lectura = leer_teclas();
+
+    // Acepto una lectura cuando lleva al menos 20 ms sin cambiar.
+    if (lectura != lectura_pendiente) {
+        lectura_pendiente = lectura;
+        tiempo_ultimo_cambio = ahora;
+        teclas_en_rebote = 1;
+
+    } else if ((uint32_t)(ahora - tiempo_ultimo_cambio) >= 20) {
+        teclas_estables = lectura_pendiente;
+        teclas_en_rebote = 0;
+    }
+
+    uint8_t nota_buzzer1 = SIN_NOTA;
+    uint8_t nota_buzzer2 = SIN_NOTA;
+
+    // Si hay mas de dos teclas, tomo las dos primeras desde Do hacia Do agudo.
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (teclas_estables & (uint8_t)_BV(i)) {
+            if (nota_buzzer1 == SIN_NOTA) {
+                nota_buzzer1 = i;
+            } else {
+                nota_buzzer2 = i;
+                break;
+            }
+        }
+    }
+
+    static const uint8_t midi_teclas[8] = {
+        60, 62, 64, 65, 67, 69, 71, 72
+    };
+
+    // Solo cambio el timer si cambia la nota, asi no reinicio un tono sostenido.
+    if (nota_buzzer1 != nota_anterior_buzzer1) {
+        poner_nota(0, nota_buzzer1 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer1]);
+        nota_anterior_buzzer1 = nota_buzzer1;
+    }
+
+    if (nota_buzzer2 != nota_anterior_buzzer2) {
+        poner_nota(1, nota_buzzer2 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer2]);
+        nota_anterior_buzzer2 = nota_buzzer2;
+    }
+
+}
+
+static void mantener_reloj_activo(void)
+{
+    // Mantener siempre el reloj de 4 ms en funcionamiento.
+    arrancar_reloj();
+}
+
+
+int main(void)
+{
+    // A4 (PC4/SDA) y A5 (PC5/SCL) quedan reservados para el LCD I2C.
+    // Entradas D2 a D7 con pull-ups.
+    DDRD &= (uint8_t)~0xFCu;
+    PORTD |= 0xFCu;
+
+    // Entradas D8 y D10 con pull-ups.
+    DDRB &= (uint8_t)~(_BV(PB0) | _BV(PB2));
+    PORTB |= _BV(PB0) | _BV(PB2);
+
+    // Salidas D9 y D11.
+    PORTB &= (uint8_t)~(_BV(PB1) | _BV(PB3));
+    DDRB |= _BV(PB1) | _BV(PB3);
+
+    apagar_buzzers();
+    // Timer0: interrupcion cada 4 ms.
+    TCCR0A = _BV(WGM01);
+    OCR0A = 249;
+    TCCR0B = 0;
+    TIMSK0 = _BV(OCIE0A);
+
+    // Los cambios en los pulsadores despiertan al micro; tambien los leo cada 4 ms.
+    PCMSK0 = _BV(PCINT0) | _BV(PCINT2);
+    PCMSK2 = 0xFC;
+    PCIFR = _BV(PCIF0) | _BV(PCIF2);
+    PCICR = _BV(PCIE0) | _BV(PCIE2);
+
+    arrancar_reloj();
+    set_sleep_mode(SLEEP_MODE_IDLE);
+    sei();
+
+    for (;;) {
+        actualizar_teclado(leer_reloj_ms());
+        // El Timer0 despierta al micro cada 4 ms y el sonido sigue por hardware.
+        cli();
+        mantener_reloj_activo();
+        sleep_enable();
+        sei();
+        sleep_cpu();
+        sleep_disable();
+    }
+}
