@@ -51,6 +51,159 @@ static const uint8_t divisor_timer2[73] PROGMEM = {
     3,3,3,3,3,3,3,3,3,3,3,3,3
 };
 
+// ================= LCD I2C =================
+
+#define DIRECCION_LCD 0x27u
+
+#define LCD_RS 0x01u
+#define LCD_RW 0x02u
+#define LCD_EN 0x04u
+#define LCD_LUZ 0x08u
+
+static void iniciar_i2c(void)
+{
+    // F_CPU = 16 MHz
+    // SCL = 100 kHz con prescaler = 1:
+    // TWBR = ((16 MHz / 100 kHz) - 16) / 2 = 72
+    TWSR = 0;
+    TWBR = 72;
+    TWCR = _BV(TWEN);
+}
+
+static void iniciar_envio_i2c(void)
+{
+    TWCR = _BV(TWINT) | _BV(TWSTA) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+
+    TWDR = (uint8_t)(DIRECCION_LCD << 1); // SLA + W
+    TWCR = _BV(TWINT) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+}
+
+static void enviar_dato_i2c(uint8_t dato)
+{
+    TWDR = dato;
+    TWCR = _BV(TWINT) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+}
+
+static void terminar_envio_i2c(void)
+{
+    TWCR = _BV(TWINT) | _BV(TWEN) | _BV(TWSTO);
+}
+
+static void enviar_al_modulo_lcd(uint8_t dato)
+{
+    iniciar_envio_i2c();
+    enviar_dato_i2c((uint8_t)(dato | LCD_LUZ));
+    terminar_envio_i2c();
+}
+
+static void dar_pulso_lcd(uint8_t dato)
+{
+    enviar_al_modulo_lcd((uint8_t)(dato | LCD_EN));
+    _delay_us(1);
+
+    enviar_al_modulo_lcd((uint8_t)(dato & (uint8_t)~LCD_EN));
+    _delay_us(50);
+}
+
+static void enviar_cuatro_bits_lcd(uint8_t cuatro_bits, uint8_t es_texto)
+{
+    uint8_t dato = (uint8_t)((cuatro_bits & 0x0Fu) << 4);
+
+    if (es_texto)
+        dato |= LCD_RS;
+
+    // RW siempre queda en 0: escritura.
+    dar_pulso_lcd(dato);
+}
+
+static void enviar_byte_lcd(uint8_t dato, uint8_t es_texto)
+{
+    enviar_cuatro_bits_lcd((uint8_t)(dato >> 4), es_texto);
+    enviar_cuatro_bits_lcd((uint8_t)(dato & 0x0Fu), es_texto);
+
+    if (!es_texto && (dato == 0x01u || dato == 0x02u))
+        _delay_ms(2);
+}
+
+static void iniciar_lcd(void)
+{
+    iniciar_i2c();
+
+    _delay_ms(50);
+
+    // Secuencia de inicializacion HD44780 en modo 4 bits.
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_ms(5);
+
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_us(150);
+
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_us(150);
+
+    enviar_cuatro_bits_lcd(0x02, 0);
+    _delay_us(150);
+
+    enviar_byte_lcd(0x28, 0); // 4 bits, 2 lineas, 5x8
+    enviar_byte_lcd(0x08, 0); // display apagado
+    enviar_byte_lcd(0x01, 0); // limpiar
+    enviar_byte_lcd(0x06, 0); // incremento automatico
+    enviar_byte_lcd(0x0C, 0); // display encendido, cursor apagado
+}
+
+static void escribir_linea_lcd(uint8_t fila, const char *texto)
+{
+    enviar_byte_lcd(fila ? 0xC0 : 0x80, 0);
+
+    for (uint8_t i = 0; i < 16; ++i) {
+        char caracter = ' ';
+
+        if (*texto)
+            caracter = *texto++;
+
+        enviar_byte_lcd((uint8_t)caracter, 1);
+    }
+}
+
+static void mostrar_nota_lcd(uint8_t fila, uint8_t nota)
+{
+    static const char * const nombres[8] = {
+        "Do4", "Re4", "Mi4", "Fa4",
+        "Sol4", "La4", "Si4", "Do5"
+    };
+
+    char linea[17] = "B1:             ";
+    linea[1] = fila ? '2' : '1';
+
+    const char *nombre =
+        (nota == SIN_NOTA) ? "--" : nombres[nota];
+
+    for (uint8_t i = 4; i < 16 && *nombre; ++i)
+        linea[i] = *nombre++;
+
+    escribir_linea_lcd(fila, linea);
+}
+
+static void mostrar_teclas_lcd(uint8_t nota1, uint8_t nota2)
+{
+    if (nota1 == SIN_NOTA && nota2 == SIN_NOTA) {
+        escribir_linea_lcd(0, "Piano listo");
+        escribir_linea_lcd(1, "Pulsa una tecla");
+    } else {
+        mostrar_nota_lcd(0, nota1);
+        mostrar_nota_lcd(1, nota2);
+    }
+}
+
 // La interrupcion del Timer0 suma 4 ms. volatile permite ver sus cambios.
 static volatile uint32_t reloj_ms;
 
@@ -215,6 +368,8 @@ static void actualizar_teclado(uint32_t ahora)
         60, 62, 64, 65, 67, 69, 71, 72
     };
 
+    uint8_t cambio = nota_buzzer1 != nota_anterior_buzzer1 || nota_buzzer2 != nota_anterior_buzzer2;
+
     // Solo cambio el timer si cambia la nota, asi no reinicio un tono sostenido.
     if (nota_buzzer1 != nota_anterior_buzzer1) {
         poner_nota(0, nota_buzzer1 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer1]);
@@ -226,6 +381,8 @@ static void actualizar_teclado(uint32_t ahora)
         nota_anterior_buzzer2 = nota_buzzer2;
     }
 
+    if (cambio)
+        mostrar_teclas_lcd(nota_buzzer1, nota_buzzer2);
 }
 
 static void mantener_reloj_activo(void)
@@ -251,6 +408,9 @@ int main(void)
     DDRB |= _BV(PB1) | _BV(PB3);
 
     apagar_buzzers();
+    // Modulo PCF8574: SDA en A4, SCL en A5, direccion 0x27.
+    iniciar_lcd();
+    mostrar_teclas_lcd(SIN_NOTA, SIN_NOTA);
     // Timer0: interrupcion cada 4 ms.
     TCCR0A = _BV(WGM01);
     OCR0A = 249;
