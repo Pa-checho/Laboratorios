@@ -1,4 +1,4 @@
-/* Etapa 3: Usar Timer1 cada 5 segundos.
+/* Etapa 4: Medir con DHT11 y controlar los LED.
  * C para ATmega328P / Arduino Uno R3 a 16 MHz.
  * Cada archivo es un programa completo: compilar SOLO una etapa.
  * LED: D4/PD4, D5/PD5, D6/PD6 y calefactor D8/PB0.
@@ -16,6 +16,11 @@
 #define LED_1 PD4
 #define LED_2 PD5
 #define LED_3 PD6
+
+/* DATA del DHT11: D2, resistencia de 4,7 kohm a 5 V. */
+#define DHT_PIN PD2
+int16_t punto_medio = 22; /* Todavia fijo; el menu se agrega en la etapa 6. */
+int16_t temperatura = -2; /* -2: esperando; -1: fallo del sensor. */
 
 void leds_iniciar(void)
 {
@@ -119,40 +124,108 @@ void temporizador_iniciar(void)
     TCCR1B = (1 << WGM12) | (1 << CS12);
 }
 
-/* Secuencia de prueba: calefactor, reposo, bajo, medio y alto.
- * Todavia NO representa una temperatura medida.
- */
-void mostrar_paso(uint8_t paso)
+/* Esperas limitadas: un sensor ausente no bloquea el programa. */
+uint8_t dht_esperar(uint8_t nivel)
 {
-    PORTB &= ~(1 << CALEFACTOR_PIN);
-    ventilador(0);
-    if (paso == 0) PORTB |= (1 << CALEFACTOR_PIN);
-    else if (paso >= 2) ventilador(paso - 1);
+    uint8_t intentos = 0;
+    while (((PIND & (1 << DHT_PIN)) != 0) != nivel) {
+        if (++intentos == 100) {
+            return 0;
+        }
+        _delay_us(1);
+    }
+    return 1;
 }
 
-void informar_paso(uint8_t paso)
+/* Recibe 40 bits y verifica la suma. Usa la temperatura entera. */
+int16_t dht11_leer(void)
 {
-    if (paso == 0) serie_texto("Prueba: calefactor encendido\r\n");
-    else if (paso == 1) serie_texto("Prueba: todas las salidas apagadas\r\n");
-    else if (paso == 2) serie_texto("Prueba: ventilador bajo, 1 LED\r\n");
-    else if (paso == 3) serie_texto("Prueba: ventilador medio, 2 LED\r\n");
-    else serie_texto("Prueba: ventilador alto, 3 LED\r\n");
+    uint8_t datos[5] = {0, 0, 0, 0, 0};
+    uint8_t i;
+
+    /* Solicita una lectura manteniendo DATA bajo por 20 ms. */
+    PORTD &= ~(1 << DHT_PIN);
+    DDRD |= (1 << DHT_PIN);
+    _delay_ms(20);
+
+    /* Libera DATA; la resistencia externa eleva la linea. */
+    DDRD &= ~(1 << DHT_PIN);
+    _delay_us(10);
+
+    /* Respuesta inicial: nivel bajo, alto y comienzo de datos. */
+    if (!dht_esperar(0)) return -1;
+    if (!dht_esperar(1)) return -1;
+    if (!dht_esperar(0)) return -1;
+
+    for (i = 0; i < 40; i++) {
+        if (!dht_esperar(1)) return -1;
+        /* Un 0 tiene un pulso alto corto; un 1, uno mas largo. */
+        _delay_us(40);
+        datos[i / 8] <<= 1;
+        if (PIND & (1 << DHT_PIN)) {
+            datos[i / 8] |= 1;
+        }
+        if (!dht_esperar(0)) return -1;
+    }
+
+    /* Comprueba que los datos recibidos no esten corruptos. */
+    if ((uint8_t)(datos[0] + datos[1] + datos[2] + datos[3]) != datos[4]) {
+        return -1;
+    }
+    return datos[2];
+}
+
+void controlar_temperatura(void)
+{
+    /* Siempre apaga primero el calefactor antes de decidir. */
+    PORTB &= ~(1 << CALEFACTOR_PIN);
+
+    if (temperatura < 0) {
+        ventilador(0);
+        if (temperatura == -2) serie_texto("Esperando primera lectura.\r\n");
+        else serie_texto("ERROR DHT11 | Todas las salidas apagadas.\r\n");
+        return;
+    }
+
+    serie_texto("Temperatura: ");
+    serie_numero(temperatura);
+    serie_texto(" C | ");
+
+    if (temperatura < punto_medio - 6) {
+        ventilador(0);
+        PORTB |= (1 << CALEFACTOR_PIN);
+        serie_texto("Calefactor encendido | Ventilador apagado\r\n");
+    } else if (temperatura <= punto_medio + 6) {
+        ventilador(0);
+        serie_texto("Calefactor apagado | Ventilador apagado\r\n");
+    } else if (temperatura <= punto_medio + 17) {
+        ventilador(1);
+        serie_texto("Calefactor apagado | Ventilador BAJO: 1 LED\r\n");
+    } else if (temperatura <= punto_medio + 28) {
+        ventilador(2);
+        serie_texto("Calefactor apagado | Ventilador MEDIO: 2 LED\r\n");
+    } else {
+        /* Con punto medio 22, el nivel alto empieza en 51 C. */
+        ventilador(3);
+        serie_texto("Calefactor apagado | Ventilador ALTO: 3 LED\r\n");
+    }
 }
 
 int main(void)
 {
-    uint8_t paso = 0;
     salidas_iniciar();
+    DDRD &= ~(1 << DHT_PIN);
     serie_iniciar();
-    serie_texto("Prueba de salidas, sin sensor.\r\n");
+    serie_texto("Punto medio fijo: 22 C. Primera lectura en 5 s.\r\n");
     temporizador_iniciar();
-    sei(); /* Permite ejecutar la interrupcion de Timer1. */
+    sei();
     while (1) {
-        if (!medir) continue; /* Sigue revisando la bandera. */
-        medir = 0;
-        mostrar_paso(paso);
-        informar_paso(paso);
-        paso++;
-        if (paso == 5) paso = 0; /* Repite la secuencia. */
+        if (medir) {
+            medir = 0;
+            cli(); /* Evita que una interrupcion altere los pulsos del DHT11. */
+            temperatura = dht11_leer();
+            sei();
+            controlar_temperatura();
+        }
     }
 }
