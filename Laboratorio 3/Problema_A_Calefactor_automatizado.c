@@ -1,4 +1,4 @@
-/* Etapa 4: Medir con DHT11 y controlar los LED.
+/* Etapa 5: Agregar la pantalla LCD.
  * C para ATmega328P / Arduino Uno R3 a 16 MHz.
  * Cada archivo es un programa completo: compilar SOLO una etapa.
  * LED: D4/PD4, D5/PD5, D6/PD6 y calefactor D8/PB0.
@@ -21,6 +21,9 @@
 #define DHT_PIN PD2
 int16_t punto_medio = 22; /* Todavia fijo; el menu se agrega en la etapa 6. */
 int16_t temperatura = -2; /* -2: esperando; -1: fallo del sensor. */
+
+#define LCD_RS PB1 /* Arduino D9. */
+#define LCD_E PB2  /* Arduino D10. Datos: A0..A3. */
 
 void leds_iniciar(void)
 {
@@ -124,6 +127,98 @@ void temporizador_iniciar(void)
     TCCR1B = (1 << WGM12) | (1 << CS12);
 }
 
+void lcd_4bits(uint8_t dato)
+{
+    /* PC0..PC3 van a D4..D7. Conserva los otros bits del puerto C. */
+    PORTC = (PORTC & 0xF0) | (dato & 0x0F);
+    _delay_us(1);
+    PORTB |= (1 << LCD_E);
+    _delay_us(1);
+    PORTB &= ~(1 << LCD_E);
+    _delay_us(1);
+}
+
+void lcd_enviar(uint8_t dato, uint8_t es_caracter)
+{
+    if (es_caracter) PORTB |= (1 << LCD_RS);
+    else PORTB &= ~(1 << LCD_RS);
+
+    lcd_4bits(dato >> 4); /* Primero los cuatro bits superiores. */
+    lcd_4bits(dato);      /* Luego los cuatro inferiores. */
+    _delay_us(50);
+}
+
+void lcd_comando(uint8_t comando)
+{
+    lcd_enviar(comando, 0);
+    if (comando == 0x01 || comando == 0x02) _delay_ms(2);
+}
+
+void lcd_texto(const char *texto)
+{
+    while (*texto != '\0') {
+        lcd_enviar(*texto, 1);
+        texto++;
+    }
+}
+
+void lcd_numero(int16_t numero)
+{
+    char texto[7];
+    numero_a_texto(numero, texto);
+    lcd_texto(texto);
+}
+
+void lcd_iniciar(void)
+{
+    PORTB &= ~((1 << LCD_RS) | (1 << LCD_E));
+    DDRB |= (1 << LCD_RS) | (1 << LCD_E);
+    DDRC |= 0x0F;
+    PORTC &= 0xF0;
+
+    /* Secuencia de inicio indicada por el controlador HD44780. */
+    _delay_ms(40);
+    lcd_4bits(3);
+    _delay_ms(5);
+    lcd_4bits(3);
+    _delay_us(150);
+    lcd_4bits(3);
+    _delay_us(150);
+    lcd_4bits(2);
+    _delay_us(50);
+    lcd_comando(0x28); /* 4 bits, 2 lineas, caracteres de 5x8. */
+    lcd_comando(0x08); /* Pantalla apagada durante el inicio. */
+    lcd_comando(0x01); /* Borra la pantalla. */
+    lcd_comando(0x06); /* Avanza el cursor al escribir. */
+    lcd_comando(0x0C); /* Pantalla encendida, cursor oculto. */
+}
+
+void lcd_actualizar(void)
+{
+    lcd_comando(0x80); /* Principio de la primera linea. */
+    lcd_texto("                ");
+    lcd_comando(0x80);
+    if (temperatura == -2) lcd_texto("T:--");
+    else if (temperatura < 0) lcd_texto("T:ERR");
+    else {
+        lcd_texto("T:");
+        lcd_numero(temperatura);
+        lcd_texto("C");
+    }
+    lcd_texto(" PM:");
+    lcd_numero(punto_medio);
+    lcd_texto("C");
+
+    lcd_comando(0xC0); /* Principio de la segunda linea. */
+    lcd_texto("                ");
+    lcd_comando(0xC0);
+    lcd_texto("Medio:");
+    lcd_numero(punto_medio - 6);
+    lcd_texto("-");
+    lcd_numero(punto_medio + 6);
+    lcd_texto("C");
+}
+
 /* Esperas limitadas: un sensor ausente no bloquea el programa. */
 uint8_t dht_esperar(uint8_t nivel)
 {
@@ -216,6 +311,8 @@ int main(void)
     salidas_iniciar();
     DDRD &= ~(1 << DHT_PIN);
     serie_iniciar();
+    lcd_iniciar();
+    lcd_actualizar();
     serie_texto("Punto medio fijo: 22 C. Primera lectura en 5 s.\r\n");
     temporizador_iniciar();
     sei();
@@ -226,6 +323,7 @@ int main(void)
             temperatura = dht11_leer();
             sei();
             controlar_temperatura();
+            lcd_actualizar();
         }
     }
 }
