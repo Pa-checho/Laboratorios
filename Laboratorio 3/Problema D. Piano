@@ -9,6 +9,7 @@
 #include <util/atomic.h>
 #include <util/delay.h>
 #include <stdint.h>
+#include "librerias_piano/twi.h"
 
 /*
   ARDUINO UNO - ATmega328P - 16 MHz
@@ -290,49 +291,13 @@ static const uint8_t divisor_timer2[73] PROGMEM = {
 #define LCD_EN 0x04u
 #define LCD_LUZ 0x08u
 
-static void iniciar_i2c(void)
-{
-    // F_CPU = 16 MHz
-    // SCL = 100 kHz con prescaler = 1:
-    // TWBR = ((16 MHz / 100 kHz) - 16) / 2 = 72
-    TWSR = 0;
-    TWBR = 72;
-    TWCR = _BV(TWEN);
-}
-
-static void iniciar_envio_i2c(void)
-{
-    TWCR = _BV(TWINT) | _BV(TWSTA) | _BV(TWEN);
-
-    while (!(TWCR & _BV(TWINT))) {
-    }
-
-    TWDR = (uint8_t)(DIRECCION_LCD << 1); // SLA + W
-    TWCR = _BV(TWINT) | _BV(TWEN);
-
-    while (!(TWCR & _BV(TWINT))) {
-    }
-}
-
-static void enviar_dato_i2c(uint8_t dato)
-{
-    TWDR = dato;
-    TWCR = _BV(TWINT) | _BV(TWEN);
-
-    while (!(TWCR & _BV(TWINT))) {
-    }
-}
-
-static void terminar_envio_i2c(void)
-{
-    TWCR = _BV(TWINT) | _BV(TWEN) | _BV(TWSTO);
-}
-
 static void enviar_al_modulo_lcd(uint8_t dato)
 {
-    iniciar_envio_i2c();
-    enviar_dato_i2c((uint8_t)(dato | LCD_LUZ));
-    terminar_envio_i2c();
+    // Como en clase: START, direccion, dato y STOP.
+    TWI_start();
+    TWI_write((uint8_t)(DIRECCION_LCD << 1)); // Bit R/W = 0: escritura.
+    TWI_write((uint8_t)(dato | LCD_LUZ));
+    TWI_stop();
 }
 
 static void dar_pulso_lcd(uint8_t dato)
@@ -366,7 +331,7 @@ static void enviar_byte_lcd(uint8_t dato, uint8_t es_texto)
 
 static void iniciar_lcd(void)
 {
-    iniciar_i2c();
+    TWI_init();
 
     _delay_ms(50);
 
