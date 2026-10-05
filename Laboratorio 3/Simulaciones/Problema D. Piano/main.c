@@ -1,0 +1,900 @@
+#ifndef F_CPU
+#define F_CPU 16000000UL
+#endif
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/sleep.h>
+#include <avr/pgmspace.h>
+#include <util/atomic.h>
+#include <util/delay.h>
+#include <stdint.h>
+#include "librerias_piano/twi.h"
+
+/*
+  ARDUINO UNO - ATmega328P - 16 MHz
+
+  Pulsadores conectados a GND:
+  Do: D2
+  Re: D3
+  Mi: D4
+  Fa: D5
+  Sol: D6
+  La: D7
+  Si: D8
+  Do agudo: D10
+
+  Buzzers mediante transistores:
+  Buzzer 1: D9
+  Buzzer 2: D11
+
+  LCD 16x2 con modulo I2C PCF8574:
+  GND = GND
+  VCC = 5V
+  SDA = A4 (PC4 / SDA)
+  SCL = A5 (PC5 / SCL)
+
+  Direccion I2C asumida: 0x27
+  Mapeo PCF8574 asumido:
+  P0=RS, P1=RW, P2=E, P3=Backlight, P4-P7=D4-D7
+
+  Monitor Serie: 9600 baudios.
+
+  C1: Megalovania
+  C2: Dragonborn
+  C3: Bloody Tears
+  C4: Game of Thrones
+  P: detener y volver al piano
+
+  Programa con main() propio.
+*/
+
+#define SIN_NOTA 255u
+#define SILENCIO 0u
+#define SOSTENER 255u
+
+#define C1_PASO_MS 125u
+#define C1_PASOS 160u
+
+#define C2_PASOS 144u
+#define C2_PASO_MS 125u
+
+#define C3_PASOS 256u
+#define C3_PASO_MS 125u
+
+#define C4_PASOS 552u
+#define C4_PASO_MS 176u
+
+/*
+  Cada pareja contiene las notas de los dos buzzers.
+  0: silencio.
+  255: prolongar la nota anterior.
+  Otros valores: notas MIDI.
+*/
+
+// C4: Game of Thrones.
+// 92 compases, aproximadamente 170 BPM.
+// Segunda voz en los compases 73 a 88.
+static const uint8_t cancion_c4[C4_PASOS][2] PROGMEM = {
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 1
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 2
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 3
+    {69,0},{255,0},{62,0},{255,0},{65,0},{67,0}, // 4
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 5
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 6
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 7
+    {69,0},{255,0},{62,0},{255,0},{66,0},{67,0}, // 8
+    {69,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 9
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 10
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 11
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 12
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 13
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 14
+    {64,0},{255,0},{57,0},{255,0},{60,0},{62,0}, // 15
+    {64,0},{255,0},{57,0},{255,0},{60,0},{255,0}, // 16
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 17
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 18
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 19
+    {0,0},{0,0},{0,0},{0,0},{0,0},{0,0}, // 20
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 21
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 22
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 23
+    {62,0},{255,0},{55,0},{255,0},{0,0},{0,0}, // 24
+    {69,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 25
+    {62,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 26
+    {65,0},{67,0},{69,0},{255,0},{255,0},{255,0}, // 27
+    {62,0},{255,0},{255,0},{255,0},{65,0},{67,0}, // 28
+    {64,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 29
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 30
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 31
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 32
+    {67,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 33
+    {60,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 34
+    {65,0},{64,0},{67,0},{255,0},{255,0},{255,0}, // 35
+    {60,0},{255,0},{255,0},{255,0},{65,0},{64,0}, // 36
+    {62,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 37
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 38
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 39
+    {255,0},{255,0},{69,0},{255,0},{74,0},{255,0}, // 40
+    {81,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 41
+    {74,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 42
+    {77,0},{79,0},{81,0},{255,0},{255,0},{255,0}, // 43
+    {74,0},{255,0},{255,0},{255,0},{77,0},{79,0}, // 44
+    {76,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 45
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 46
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 47
+    {255,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 48
+    {79,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 49
+    {72,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 50
+    {76,0},{255,0},{255,0},{77,0},{255,0},{255,0}, // 51
+    {76,0},{255,0},{255,0},{72,0},{255,0},{255,0}, // 52
+    {74,0},{255,0},{255,0},{255,0},{255,0},{255,0}, // 53
+    {255,0},{255,0},{255,0},{255,0},{82,0},{84,0}, // 54
+    {86,0},{255,0},{81,0},{255,0},{82,0},{84,0}, // 55
+    {86,0},{255,0},{81,0},{255,0},{82,0},{84,0}, // 56
+    {74,0},{255,0},{65,0},{255,0},{69,0},{70,0}, // 57
+    {74,0},{255,0},{65,0},{255,0},{72,0},{74,0}, // 58
+    {72,0},{255,0},{65,0},{255,0},{69,0},{70,0}, // 59
+    {72,0},{255,0},{65,0},{255,0},{69,0},{255,0}, // 60
+    {70,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 61
+    {70,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 62
+    {69,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 63
+    {69,0},{255,0},{62,0},{255,0},{67,0},{69,0}, // 64
+    {65,0},{255,0},{58,0},{255,0},{62,0},{64,0}, // 65
+    {65,0},{255,0},{58,0},{255,0},{64,0},{65,0}, // 66
+    {65,0},{255,0},{58,0},{255,0},{65,0},{255,0}, // 67
+    {67,0},{255,0},{60,0},{255,0},{67,0},{255,0}, // 68
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 69
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 70
+    {62,0},{255,0},{55,0},{255,0},{58,0},{60,0}, // 71
+    {62,0},{255,0},{255,0},{255,0},{0,0},{0,0}, // 72
+    {86,74},{255,255},{255,255},{255,255},{255,255},{255,255}, // 73
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 74
+    {84,72},{255,255},{255,255},{255,255},{255,255},{255,255}, // 75
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 76
+    {82,70},{74,62},{255,255},{255,255},{255,255},{255,255}, // 77
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 78
+    {81,69},{255,255},{255,255},{255,255},{255,255},{255,255}, // 79
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 80
+    {70,58},{255,255},{255,255},{255,255},{255,255},{255,255}, // 81
+    {255,255},{255,255},{255,255},{255,255},{255,255},{255,255}, // 82
+    {77,65},{255,255},{255,255},{255,255},{255,255},{255,255}, // 83
+    {76,64},{255,255},{255,255},{255,255},{255,255},{255,255}, // 84
+    {74,62},{255,255},{255,255},{255,255},{82,70},{84,72}, // 85
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 86
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 87
+    {86,74},{255,255},{81,69},{255,255},{82,70},{84,72}, // 88
+    {0,0},{0,0},{0,0},{0,0},{70,0},{72,0}, // 89
+    {74,0},{255,0},{69,0},{255,0},{70,0},{72,0}, // 90
+    {74,0},{255,0},{69,0},{255,0},{70,0},{72,0}, // 91
+    {74,0},{255,0},{255,0},{255,0},{0,0},{0,0} // 92
+};
+
+// C1: Megalovania.
+static const uint8_t cancion_c1[C1_PASOS][2] PROGMEM = {
+    {0,50},{0,50},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,48},{0,48},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,47},{0,47},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,46},{0,46},{62,0},{0,0},{57,0},{0,0},{0,0},{56,0},
+    {0,0},{55,0},{0,0},{53,0},{255,0},{50,0},{53,0},{55,0},
+    {0,38},{0,50},{62,38},{0,255},{57,38},{0,38},{0,0},{56,38},
+    {0,0},{55,38},{0,0},{53,38},{255,38},{50,38},{53,38},{55,255},
+    {0,36},{0,48},{62,36},{0,255},{57,36},{0,36},{0,0},{56,36},
+    {0,0},{55,36},{0,0},{53,36},{255,36},{50,36},{53,36},{55,255},
+    {0,35},{0,47},{62,35},{0,255},{57,35},{0,35},{0,0},{56,35},
+    {0,0},{55,35},{0,0},{53,35},{255,35},{50,35},{53,35},{55,255},
+    {0,34},{0,46},{62,34},{0,255},{57,34},{0,34},{0,0},{56,34},
+    {0,0},{55,36},{0,0},{53,36},{255,36},{50,36},{53,36},{55,255},
+    {62,26},{62,255},{74,26},{0,255},{69,26},{0,26},{0,0},{68,26},
+    {0,0},{67,26},{0,0},{65,26},{255,26},{62,255},{65,26},{67,255},
+    {60,24},{60,255},{74,24},{0,255},{69,24},{0,24},{0,0},{68,24},
+    {0,0},{67,24},{0,0},{65,24},{255,24},{62,255},{65,24},{67,255}
+};
+
+// C2: Dragonborn.
+static const uint8_t cancion_c2[C2_PASOS][2] PROGMEM = {
+    {86,47},{255,255},{255,255},{255,47},{85,255},{255,255},{255,47},{255,255},
+    {83,255},{255,255},{255,47},{255,255},{81,43},{255,255},{255,255},{255,43},
+    {79,255},{255,255},{255,43},{255,255},{78,255},{255,255},{255,43},{255,255},
+    {76,40},{255,255},{255,255},{255,40},{255,40},{255,255},{255,40},{255,255},
+    {74,40},{255,255},{78,40},{255,255},{76,33},{255,255},{255,255},{255,33},
+    {255,33},{255,255},{255,33},{255,255},{255,33},{255,255},{86,33},{85,255},
+    {86,47},{255,255},{255,35},{255,255},{86,255},{85,255},{86,47},{255,255},
+    {255,35},{255,255},{86,255},{85,255},{88,45},{255,255},{86,33},{255,255},
+    {85,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{81,255},
+    {83,43},{255,255},{255,31},{255,255},{83,255},{81,255},{83,40},{255,255},
+    {255,28},{255,255},{81,255},{83,255},{85,45},{255,255},{86,33},{255,255},
+    {81,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{85,255},
+    {86,47},{255,255},{86,35},{255,255},{86,255},{88,255},{90,43},{255,255},
+    {255,31},{255,255},{85,255},{86,255},{88,45},{255,255},{86,33},{255,255},
+    {85,255},{255,255},{83,47},{255,255},{255,35},{255,255},{83,255},{81,255},
+    {83,43},{255,255},{255,31},{255,255},{83,255},{81,255},{83,40},{255,255},
+    {255,28},{255,255},{81,255},{83,255},{85,45},{255,255},{86,33},{255,255},
+    {81,255},{255,255},{83,47},{255,255},{255,255},{255,255},{255,47},{255,255}
+};
+
+// C3: Bloody Tears.
+static const uint8_t cancion_c3[C3_PASOS][2] PROGMEM = {
+    {70,46},{65,255},{77,255},{65,255},{75,53},{65,255},{73,255},{65,255},
+    {72,46},{65,255},{73,255},{65,255},{72,53},{65,255},{70,255},{65,255},
+    {72,41},{65,255},{73,255},{65,255},{75,48},{65,255},{73,255},{65,255},
+    {72,41},{65,255},{68,255},{65,255},{72,48},{65,255},{70,255},{65,255},
+    {70,46},{65,255},{77,255},{65,255},{75,53},{65,255},{73,255},{65,255},
+    {72,46},{65,255},{73,255},{65,255},{72,53},{65,255},{70,255},{65,255},
+    {72,41},{65,255},{73,255},{65,255},{75,48},{65,255},{73,255},{65,255},
+    {72,41},{65,255},{68,255},{65,255},{72,48},{65,255},{70,255},{65,255},
+    {75,46},{255,255},{80,255},{77,255},{255,53},{60,255},{58,255},{60,255},
+    {61,46},{255,255},{63,255},{255,255},{75,53},{255,255},{73,255},{255,255},
+    {75,44},{255,255},{255,255},{80,255},{255,51},{255,255},{77,255},{255,255},
+    {255,44},{255,255},{255,255},{255,255},{75,51},{255,255},{73,255},{255,255},
+    {75,42},{255,255},{80,255},{77,255},{255,49},{63,255},{61,255},{63,255},
+    {65,42},{255,255},{66,255},{255,255},{75,49},{255,255},{77,255},{255,255},
+    {78,41},{255,255},{255,255},{80,255},{255,48},{255,255},{255,255},{255,255},
+    {77,41},{255,255},{255,255},{78,255},{255,48},{255,255},{255,255},{255,255},
+    {75,46},{255,255},{80,255},{77,255},{255,53},{60,255},{58,255},{60,255},
+    {61,46},{255,255},{63,255},{255,255},{75,53},{255,255},{73,255},{255,255},
+    {75,44},{255,255},{255,255},{80,255},{255,51},{255,255},{77,255},{255,255},
+    {255,44},{255,255},{255,255},{255,255},{75,51},{255,255},{73,255},{255,255},
+    {75,42},{255,255},{80,255},{77,255},{255,49},{63,255},{61,255},{63,255},
+    {65,42},{255,255},{66,255},{255,255},{75,49},{255,255},{77,255},{255,255},
+    {78,41},{255,255},{255,255},{80,255},{255,48},{255,255},{255,255},{255,255},
+    {77,41},{255,255},{79,255},{70,255},{81,48},{255,255},{84,255},{255,255},
+    {72,46},{255,255},{255,255},{70,255},{255,53},{255,255},{82,255},{255,255},
+    {72,44},{255,255},{255,255},{70,255},{255,51},{255,255},{82,255},{255,255},
+    {72,42},{255,255},{255,255},{70,255},{255,49},{255,255},{82,255},{255,255},
+    {73,44},{85,255},{72,255},{84,255},{70,51},{82,255},{68,255},{80,255},
+    {72,46},{255,255},{70,255},{82,255},{255,53},{255,255},{255,255},{255,255},
+    {72,44},{255,255},{70,255},{82,255},{255,51},{255,255},{255,255},{255,255},
+    {72,42},{255,255},{70,255},{82,255},{255,49},{255,255},{255,255},{255,255},
+    {85,44},{255,255},{87,255},{255,255},{84,51},{85,255},{0,0},{0,0}
+};
+
+// Valores de comparacion para las notas MIDI 24 a 96.
+// Se guardan en Flash con PROGMEM para no ocupar la RAM con las tablas.
+// La frecuencia se obtiene con F_CPU / (2 * divisor * (OCR + 1)).
+static const uint16_t comparacion_timer1[73] PROGMEM = {
+    30577,28861,27241,25712,24269,22906,21621,20408,19262,18181,17160,16197,
+    15288,14430,13620,12855,12134,11453,10810,10203,9630,9090,8580,8098,
+    7644,7214,6810,6427,6066,5726,5404,5101,4815,4544,4289,4049,
+    3821,3607,3404,3213,3033,2862,2702,2550,2407,2272,2144,2024,
+    1910,1803,1702,1606,1516,1431,1350,1275,1203,1135,1072,1011,
+    955,901,850,803,757,715,675,637,601,567,535,505,477
+};
+
+static const uint8_t comparacion_timer2[73] PROGMEM = {
+    238,224,212,200,189,178,168,158,149,141,133,126,
+    118,112,105,99,94,88,83,79,74,70,66,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,252,
+    238,224,212,200,189,178,168,158,149,141,133,126,118
+};
+
+static const uint8_t divisor_timer2[73] PROGMEM = {
+    7,7,7,7,7,7,7,7,7,7,7,7,
+    7,7,7,7,7,7,7,7,7,7,7,6,
+    6,6,6,6,6,6,6,6,6,6,6,5,
+    5,5,5,5,5,5,5,5,5,5,5,4,
+    4,4,4,4,4,4,4,4,4,4,4,3,
+    3,3,3,3,3,3,3,3,3,3,3,3,3
+};
+
+// ================= LCD I2C =================
+
+#define DIRECCION_LCD 0x27u
+
+#define LCD_RS 0x01u
+#define LCD_RW 0x02u
+#define LCD_EN 0x04u
+#define LCD_LUZ 0x08u
+
+static void enviar_al_modulo_lcd(uint8_t dato)
+{
+    // Como en clase: START, direccion, dato y STOP.
+    TWI_start();
+    TWI_write((uint8_t)(DIRECCION_LCD << 1)); // Bit R/W = 0: escritura.
+    TWI_write((uint8_t)(dato | LCD_LUZ));
+    TWI_stop();
+}
+
+static void dar_pulso_lcd(uint8_t dato)
+{
+    enviar_al_modulo_lcd((uint8_t)(dato | LCD_EN));
+    _delay_us(1);
+
+    enviar_al_modulo_lcd((uint8_t)(dato & (uint8_t)~LCD_EN));
+    _delay_us(50);
+}
+
+static void enviar_cuatro_bits_lcd(uint8_t cuatro_bits, uint8_t es_texto)
+{
+    uint8_t dato = (uint8_t)((cuatro_bits & 0x0Fu) << 4);
+
+    if (es_texto)
+        dato |= LCD_RS;
+
+    // RW siempre queda en 0: escritura.
+    dar_pulso_lcd(dato);
+}
+
+static void enviar_byte_lcd(uint8_t dato, uint8_t es_texto)
+{
+    enviar_cuatro_bits_lcd((uint8_t)(dato >> 4), es_texto);
+    enviar_cuatro_bits_lcd((uint8_t)(dato & 0x0Fu), es_texto);
+
+    if (!es_texto && (dato == 0x01u || dato == 0x02u))
+        _delay_ms(2);
+}
+
+static void iniciar_lcd(void)
+{
+    TWI_init();
+
+    _delay_ms(50);
+
+    // Secuencia de inicializacion HD44780 en modo 4 bits.
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_ms(5);
+
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_us(150);
+
+    enviar_cuatro_bits_lcd(0x03, 0);
+    _delay_us(150);
+
+    enviar_cuatro_bits_lcd(0x02, 0);
+    _delay_us(150);
+
+    enviar_byte_lcd(0x28, 0); // 4 bits, 2 lineas, 5x8
+    enviar_byte_lcd(0x08, 0); // display apagado
+    enviar_byte_lcd(0x01, 0); // limpiar
+    enviar_byte_lcd(0x06, 0); // incremento automatico
+    enviar_byte_lcd(0x0C, 0); // display encendido, cursor apagado
+}
+
+static void escribir_linea_lcd(uint8_t fila, const char *texto)
+{
+    enviar_byte_lcd(fila ? 0xC0 : 0x80, 0);
+
+    for (uint8_t i = 0; i < 16; ++i) {
+        char caracter = ' ';
+
+        if (*texto)
+            caracter = *texto++;
+
+        enviar_byte_lcd((uint8_t)caracter, 1);
+    }
+}
+
+static void mostrar_nota_lcd(uint8_t fila, uint8_t nota)
+{
+    static const char * const nombres[8] = {
+        "Do4", "Re4", "Mi4", "Fa4",
+        "Sol4", "La4", "Si4", "Do5"
+    };
+
+    char linea[17] = "B1:             ";
+    linea[1] = fila ? '2' : '1';
+
+    const char *nombre =
+        (nota == SIN_NOTA) ? "--" : nombres[nota];
+
+    for (uint8_t i = 4; i < 16 && *nombre; ++i)
+        linea[i] = *nombre++;
+
+    escribir_linea_lcd(fila, linea);
+}
+
+static void mostrar_teclas_lcd(uint8_t nota1, uint8_t nota2)
+{
+    if (nota1 == SIN_NOTA && nota2 == SIN_NOTA) {
+        escribir_linea_lcd(0, "Piano listo");
+        escribir_linea_lcd(1, "Pulsa una tecla");
+    } else {
+        mostrar_nota_lcd(0, nota1);
+        mostrar_nota_lcd(1, nota2);
+    }
+}
+
+// ================= VARIABLES =================
+
+// La interrupcion del Timer0 suma 4 ms. volatile permite ver sus cambios.
+static volatile uint32_t reloj_ms;
+
+// Guardo los caracteres que llegan mientras el programa atiende otras tareas.
+// Es una cola circular de 64 posiciones; se pueden guardar hasta 63 caracteres.
+static volatile uint8_t datos_recibidos[64];
+static volatile uint8_t posicion_escritura;
+static volatile uint8_t posicion_lectura;
+static volatile uint8_t error_recepcion;
+
+static uint8_t cancion_actual;
+static uint8_t esperando_numero_cancion;
+static uint16_t paso_actual;
+static uint16_t total_pasos;
+static uint16_t duracion_paso_ms;
+static uint8_t vueltas_restantes;
+
+static const uint8_t (*partitura)[2];
+
+static uint8_t buzzer_sonando[2];
+static uint32_t tiempo_proximo_paso;
+static uint32_t tiempo_fin_nota[2];
+
+static uint8_t nota_anterior_buzzer1 = SIN_NOTA;
+static uint8_t nota_anterior_buzzer2 = SIN_NOTA;
+
+static volatile uint8_t cambio_teclas = 1;
+static uint8_t lectura_pendiente;
+static uint8_t teclas_estables;
+static uint8_t teclas_en_rebote = 1;
+static uint32_t tiempo_ultimo_cambio;
+
+// ================= RELOJ =================
+
+static void arrancar_reloj(void)
+{
+    if (TCCR0B == 0) {
+        TCNT0 = 0;
+        TIFR0 = _BV(OCF0A);
+        TCCR0B = _BV(CS02);
+    }
+}
+
+static void cambio_en_teclas(void)
+{
+    cambio_teclas = 1;
+    arrancar_reloj();
+}
+
+ISR(PCINT0_vect)
+{
+    cambio_en_teclas();
+}
+
+ISR(PCINT2_vect)
+{
+    cambio_en_teclas();
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+    reloj_ms += 4;
+}
+
+ISR(USART_RX_vect)
+{
+    uint8_t estado = UCSR0A;
+    uint8_t dato = UDR0;
+    uint8_t siguiente = (uint8_t)((posicion_escritura + 1u) & 63u);
+
+    if ((estado & (_BV(FE0) | _BV(DOR0) | _BV(UPE0))) ||
+        siguiente == posicion_lectura) {
+        error_recepcion = 1;
+    } else {
+        datos_recibidos[posicion_escritura] = dato;
+        posicion_escritura = siguiente;
+    }
+}
+
+static uint32_t leer_reloj_ms(void)
+{
+    uint32_t valor;
+
+    // El micro es de 8 bits y el reloj ocupa 32: lo leo sin interrupciones.
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        valor = reloj_ms;
+    }
+
+    return valor;
+}
+
+static uint8_t se_cumplio_tiempo(uint32_t ahora, uint32_t plazo)
+{
+    return (int32_t)(ahora - plazo) >= 0;
+}
+
+// ================= UART =================
+
+static void enviar_texto_uart(const char *texto)
+{
+    while (*texto) {
+        while (!(UCSR0A & _BV(UDRE0))) {
+        }
+
+        UDR0 = (uint8_t)*texto++;
+    }
+}
+
+static void iniciar_uart(void)
+{
+    UCSR0A = 0;
+    UBRR0H = 0;
+    UBRR0L = 103;
+
+    UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
+    UCSR0B = _BV(RXEN0) | _BV(TXEN0) | _BV(RXCIE0);
+}
+
+// ================= BUZZERS =================
+
+// Buzzer 0: Timer1 y D9. Buzzer 1: Timer2 y D11.
+// Los timers cambian las salidas por hardware; no genero el sonido con delays.
+static void poner_nota(uint8_t buzzer, uint8_t nota_midi)
+{
+    uint8_t nota_valida = nota_midi >= 24 && nota_midi <= 96;
+    uint8_t indice = nota_valida ? (uint8_t)(nota_midi - 24) : 0;
+
+    if (buzzer == 0) {
+        uint16_t valor =
+            nota_valida ? pgm_read_word(&comparacion_timer1[indice]) : 0;
+
+        TCCR1B = 0;
+        TCCR1A = 0;
+        PORTB &= (uint8_t)~_BV(PB1);
+        TCNT1 = 0;
+
+        if (nota_valida) {
+            OCR1A = valor;
+            TCCR1A = _BV(COM1A0);
+            TCCR1B = _BV(WGM12) | _BV(CS11);
+        }
+    } else {
+        uint8_t valor =
+            nota_valida ? pgm_read_byte(&comparacion_timer2[indice]) : 0;
+
+        uint8_t prescaler =
+            nota_valida ? pgm_read_byte(&divisor_timer2[indice]) : 0;
+
+        TCCR2B = 0;
+        TCCR2A = 0;
+        PORTB &= (uint8_t)~_BV(PB3);
+        TCNT2 = 0;
+
+        if (nota_valida) {
+            OCR2A = valor;
+            TCCR2A = _BV(WGM21) | _BV(COM2A0);
+            TCCR2B = prescaler;
+        }
+    }
+}
+
+static void apagar_buzzers(void)
+{
+    poner_nota(0, SILENCIO);
+    poner_nota(1, SILENCIO);
+    buzzer_sonando[0] = buzzer_sonando[1] = 0;
+}
+
+// ================= MODOS =================
+
+static void volver_al_piano(void)
+{
+    cancion_actual = 0;
+    apagar_buzzers();
+
+    nota_anterior_buzzer1 = nota_anterior_buzzer2 = SIN_NOTA;
+    lectura_pendiente = teclas_estables = 0;
+    teclas_en_rebote = 1;
+    tiempo_ultimo_cambio = leer_reloj_ms();
+    cambio_teclas = 1;
+
+    arrancar_reloj();
+    mostrar_teclas_lcd(SIN_NOTA, SIN_NOTA);
+}
+
+static void iniciar_cancion(uint8_t numero)
+{
+    apagar_buzzers();
+    vueltas_restantes = 1;
+
+    if (numero == 1) {
+        partitura = cancion_c1;
+        total_pasos = C1_PASOS;
+        duracion_paso_ms = C1_PASO_MS;
+
+        escribir_linea_lcd(0, "C1: Megalovania");
+        enviar_texto_uart(
+            "\r\nC1: Megalovania (20 s). P: detener.\r\n"
+        );
+
+    } else if (numero == 2) {
+        partitura = cancion_c2;
+        total_pasos = C2_PASOS;
+        duracion_paso_ms = C2_PASO_MS;
+
+        escribir_linea_lcd(0, "C2: Dragonborn");
+        enviar_texto_uart(
+            "\r\nC2: Dragonborn (18 s, 120 BPM). P: detener.\r\n"
+        );
+    }
+
+    if (numero == 3) {
+        partitura = cancion_c3;
+        total_pasos = C3_PASOS;
+        duracion_paso_ms = C3_PASO_MS;
+        vueltas_restantes = 2;
+
+        escribir_linea_lcd(0, "C3: Bloody Tears");
+        enviar_texto_uart(
+            "\r\nC3: Bloody Tears (64 s, 120 BPM). P: detener.\r\n"
+        );
+    }
+
+    if (numero == 4) {
+        partitura = cancion_c4;
+        total_pasos = C4_PASOS;
+        duracion_paso_ms = C4_PASO_MS;
+
+        escribir_linea_lcd(0, "C4: Game Thrones");
+        enviar_texto_uart(
+            "\r\nC4: Game of Thrones (97 s, 170 BPM). P: detener.\r\n"
+        );
+    }
+
+    escribir_linea_lcd(1, "P: volver piano");
+    paso_actual = 0;
+    arrancar_reloj();
+    tiempo_proximo_paso = leer_reloj_ms();
+    cancion_actual = numero;
+}
+
+static void recibir_comandos(void)
+{
+    if (error_recepcion) {
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+            posicion_lectura = posicion_escritura;
+            error_recepcion = 0;
+        }
+
+        esperando_numero_cancion = 0;
+        enviar_texto_uart("\r\nError UART. Reenviar comando.\r\n");
+    }
+
+    while (posicion_lectura != posicion_escritura) {
+        uint8_t caracter = datos_recibidos[posicion_lectura];
+        posicion_lectura = (uint8_t)((posicion_lectura + 1u) & 63u);
+
+        if (caracter >= 'a' && caracter <= 'z')
+            caracter = (uint8_t)(caracter - 'a' + 'A');
+
+        if (caracter == '\r' || caracter == '\n') {
+            esperando_numero_cancion = 0;
+            continue;
+        }
+
+        if (caracter == ' ' || caracter == '\t')
+            continue;
+
+        if (caracter == 'P') {
+            esperando_numero_cancion = 0;
+            volver_al_piano();
+            enviar_texto_uart("\r\nModo piano.\r\n");
+
+        } else if (caracter == 'C') {
+            esperando_numero_cancion = 1;
+
+        } else if (esperando_numero_cancion && caracter >= '1' && caracter <= '4') {
+            esperando_numero_cancion = 0;
+            iniciar_cancion((uint8_t)(caracter - '0'));
+
+        } else {
+            esperando_numero_cancion = 0;
+            enviar_texto_uart("\r\nComandos: C1, C2, C3, C4, P.\r\n");
+        }
+    }
+}
+
+// ================= REPRODUCCION =================
+
+static void actualizar_cancion(uint32_t ahora)
+{
+    while (cancion_actual && se_cumplio_tiempo(ahora, tiempo_proximo_paso)) {
+        if (paso_actual >= total_pasos) {
+            if (vueltas_restantes > 1) {
+                --vueltas_restantes;
+                paso_actual = 0;
+            } else {
+                volver_al_piano();
+                enviar_texto_uart("\r\nFin de cancion. Modo piano.\r\n");
+                return;
+            }
+        }
+
+        for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
+            uint8_t nota =
+                pgm_read_byte(&partitura[paso_actual][buzzer]);
+
+            if (nota == SOSTENER)
+                continue;
+
+            poner_nota(buzzer, nota);
+            buzzer_sonando[buzzer] = nota != SILENCIO;
+
+            if (buzzer_sonando[buzzer]) {
+                uint16_t duracion = 1;
+
+                while (
+                    paso_actual + duracion < total_pasos &&
+                    pgm_read_byte(
+                        &partitura[paso_actual + duracion][buzzer]
+                    ) == SOSTENER
+                ) {
+                    ++duracion;
+                }
+
+                // Dejo 12 ms de separacion al final, incluso si la nota se prolonga.
+                tiempo_fin_nota[buzzer] =
+                    tiempo_proximo_paso +
+                    (uint32_t)duracion * duracion_paso_ms - 12u;
+            }
+        }
+
+        ++paso_actual;
+        tiempo_proximo_paso += duracion_paso_ms;
+    }
+
+    for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
+        if (buzzer_sonando[buzzer] && se_cumplio_tiempo(ahora, tiempo_fin_nota[buzzer])) {
+            poner_nota(buzzer, SILENCIO);
+            buzzer_sonando[buzzer] = 0;
+        }
+    }
+}
+
+// ================= TECLADO =================
+
+static uint8_t leer_teclas(void)
+{
+    // Con pull-up, un boton presionado se lee como 0. Invierto para trabajar con 1.
+    uint8_t pulsadores_puerto_d = (uint8_t)~PIND;
+    uint8_t pulsadores_puerto_b = (uint8_t)~PINB;
+
+    // Bits 0 a 5: D2 a D7. Despues agrego Si y Do agudo en los bits 6 y 7.
+    uint8_t teclas = (uint8_t)((pulsadores_puerto_d >> 2) & 0x3Fu);
+
+    if (pulsadores_puerto_b & _BV(PB0))
+        teclas |= _BV(6);
+
+    if (pulsadores_puerto_b & _BV(PB2))
+        teclas |= _BV(7);
+
+    return teclas;
+}
+
+static void actualizar_teclado(uint32_t ahora)
+{
+    if (cancion_actual)
+        return;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        cambio_teclas = 0;
+    }
+
+    // Lectura continua: no depende de PCINT.
+    uint8_t lectura = leer_teclas();
+
+    // Acepto una lectura cuando lleva al menos 20 ms sin cambiar.
+    if (lectura != lectura_pendiente) {
+        lectura_pendiente = lectura;
+        tiempo_ultimo_cambio = ahora;
+        teclas_en_rebote = 1;
+
+    } else if ((uint32_t)(ahora - tiempo_ultimo_cambio) >= 20) {
+        teclas_estables = lectura_pendiente;
+        teclas_en_rebote = 0;
+    }
+
+    uint8_t nota_buzzer1 = SIN_NOTA;
+    uint8_t nota_buzzer2 = SIN_NOTA;
+
+    // Si hay mas de dos teclas, tomo las dos primeras desde Do hacia Do agudo.
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (teclas_estables & (uint8_t)_BV(i)) {
+            if (nota_buzzer1 == SIN_NOTA) {
+                nota_buzzer1 = i;
+            } else {
+                nota_buzzer2 = i;
+                break;
+            }
+        }
+    }
+
+    static const uint8_t midi_teclas[8] = {
+        60, 62, 64, 65, 67, 69, 71, 72
+    };
+
+    uint8_t cambio = nota_buzzer1 != nota_anterior_buzzer1 || nota_buzzer2 != nota_anterior_buzzer2;
+
+    // Solo cambio el timer si cambia la nota, asi no reinicio un tono sostenido.
+    if (nota_buzzer1 != nota_anterior_buzzer1) {
+        poner_nota(0, nota_buzzer1 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer1]);
+        nota_anterior_buzzer1 = nota_buzzer1;
+    }
+
+    if (nota_buzzer2 != nota_anterior_buzzer2) {
+        poner_nota(1, nota_buzzer2 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer2]);
+        nota_anterior_buzzer2 = nota_buzzer2;
+    }
+
+    if (cambio)
+        mostrar_teclas_lcd(nota_buzzer1, nota_buzzer2);
+}
+
+static void mantener_reloj_activo(void)
+{
+    // Mantener siempre el reloj de 4 ms en funcionamiento.
+    arrancar_reloj();
+}
+
+// ================= PROGRAMA PRINCIPAL =================
+
+int main(void)
+{
+    // A4 (PC4/SDA) y A5 (PC5/SCL) quedan reservados para el LCD I2C.
+    // Entradas D2 a D7 con pull-ups.
+    DDRD &= (uint8_t)~0xFCu;
+    PORTD |= 0xFCu;
+
+    // Entradas D8 y D10 con pull-ups.
+    DDRB &= (uint8_t)~(_BV(PB0) | _BV(PB2));
+    PORTB |= _BV(PB0) | _BV(PB2);
+
+    // Salidas D9 y D11.
+    PORTB &= (uint8_t)~(_BV(PB1) | _BV(PB3));
+    DDRB |= _BV(PB1) | _BV(PB3);
+
+    apagar_buzzers();
+    iniciar_lcd();
+    iniciar_uart();
+
+    // Timer0: interrupcion cada 4 ms.
+    TCCR0A = _BV(WGM01);
+    OCR0A = 249;
+    TCCR0B = 0;
+    TIMSK0 = _BV(OCIE0A);
+
+    // Los cambios en los pulsadores despiertan al micro; tambien los leo cada 4 ms.
+    PCMSK0 = _BV(PCINT0) | _BV(PCINT2);
+    PCMSK2 = 0xFC;
+    PCIFR = _BV(PCIF0) | _BV(PCIF2);
+    PCICR = _BV(PCIE0) | _BV(PCIE2);
+
+    volver_al_piano();
+    set_sleep_mode(SLEEP_MODE_IDLE);
+    sei();
+
+    enviar_texto_uart(
+        "\r\nPiano listo. 9600 baudios.\r\n"
+        "C1: Megalovania; C2: Dragonborn; "
+        "C3: Bloody Tears; C4: Game of Thrones; P: piano.\r\n"
+    );
+
+    for (;;) {
+        recibir_comandos();
+
+        uint32_t ahora = leer_reloj_ms();
+
+        if (cancion_actual)
+            actualizar_cancion(ahora);
+
+        actualizar_teclado(leer_reloj_ms());
+
+        cli();
+
+        // El reloj sigue activo para revisar los botones cada 4 ms.
+        mantener_reloj_activo();
+
+        if (posicion_lectura != posicion_escritura || error_recepcion) {
+            sei();
+        } else {
+            sleep_enable();
+            sei();
+            sleep_cpu();
+            sleep_disable();
+        }
+    }
+}
