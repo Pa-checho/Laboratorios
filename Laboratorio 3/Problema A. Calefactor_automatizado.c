@@ -36,6 +36,11 @@
  */
 #define PUNTO_MINIMO -10
 #define PUNTO_MAXIMO 60
+/* El rango de reposo termina 6 C por encima del punto medio.
+ * No permitir que ese limite supere el maximo medible del DHT11.
+ */
+#define DHT11_MAXIMO 50
+#define MARGEN_SUPERIOR 6
 int16_t punto_medio = 22;
 int16_t temperatura = -2; /* -2: sin primera lectura. -1: error. */
 
@@ -353,6 +358,7 @@ void mostrar_menu(void)
 {
     serie_texto("\r\n--- MENU DE TEMPERATURA ---\r\n");
     serie_texto("Escribir punto medio (-10 a 60) y pulsar Enter.\r\n");
+    serie_texto("Proteccion DHT11: se rechazan valores mayores de 44 C.\r\n");
     serie_texto("Ejemplo: 25 seguido de Enter.\r\n");
     serie_texto("r: restaurar 22 C | m: ver menu y rangos\r\n");
     serie_texto("Retroceso: borrar digito | Escape: cancelar entrada\r\n");
@@ -406,6 +412,14 @@ void atender_menu(void)
         if (entrada_invalida || nuevo_punto < PUNTO_MINIMO ||
             nuevo_punto > PUNTO_MAXIMO) {
             serie_texto("Valor invalido. Escribir un entero de -10 a 60.\r\n");
+        } else if (nuevo_punto + MARGEN_SUPERIOR > DHT11_MAXIMO) {
+            /* Rechaza antes de modificar el punto medio o las salidas. */
+            serie_texto("Cambio rechazado: punto medio demasiado cercano ");
+            serie_texto("o superior al maximo del DHT11 (50 C).\r\n");
+            serie_texto("Se requiere un margen de 6 C. Maximo permitido: 44 C.\r\n");
+            serie_texto("Se mantiene el punto medio en ");
+            serie_numero(punto_medio);
+            serie_texto(" C.\r\n");
         } else {
             punto_medio = nuevo_punto;
             cambio = 1;
