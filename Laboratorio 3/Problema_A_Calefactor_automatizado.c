@@ -1,51 +1,56 @@
-/* Etapa 5: Agregar la pantalla LCD.
- * C para ATmega328P / Arduino Uno R3 a 16 MHz.
- * Cada archivo es un programa completo: compilar SOLO una etapa.
- * LED: D4/PD4, D5/PD5, D6/PD6 y calefactor D8/PB0.
- * Cada LED: pin -> resistencia 330 ohm -> anodo; catodo -> GND.
+/* Etapa 6: version completa, con ingreso numerico y validacion. */
+/*
+ * Control de temperatura - ATmega328P - Microchip Studio / AVR-GCC
+ * Reloj supuesto: 16 MHz. Compilar con optimizacion -Os.
+ * F_CPU debe coincidir con el reloj REAL; no configura los fusibles.
+ *
+ * DHT11 DATA: PD2, con resistencia de 4,7 kOhm a VCC.
+ * Calefactor: LED en PB0. Ventilador: LED 1/2/3 en PD4/PD5/PD6.
+ * Cada LED lleva una resistencia de 330 ohm y su catodo a GND.
+ * LCD 16x2 HD44780: RS=PB1, E=PB2, D4..D7=PC0..PC3, RW=GND.
+ * Serie TX: PD1 hacia RX del terminal. RX: PD0 desde TX del terminal.
+ * Serie: 9600 baudios, 8 bits, sin paridad, 1 bit de parada.
+ * No conectar motores ni calefactores directamente a los pines.
  */
+
 #ifndef F_CPU
 #define F_CPU 16000000UL
 #endif
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdint.h>
 
+#define DHT_PIN PD2
 #define CALEFACTOR_PIN PB0
 #define LED_1 PD4
 #define LED_2 PD5
 #define LED_3 PD6
+#define LCD_RS PB1
+#define LCD_E PB2
 
-/* DATA del DHT11: D2, resistencia de 4,7 kohm a 5 V. */
-#define DHT_PIN PD2
-int16_t punto_medio = 22; /* Todavia fijo; el menu se agrega en la etapa 6. */
-int16_t temperatura = -2; /* -2: esperando; -1: fallo del sensor. */
+/* El rango medio es punto_medio - 6 hasta punto_medio + 6.
+ * Inicialmente: 22 - 6 = 16 C y 22 + 6 = 28 C.
+ * Limites de ingreso -10..60 C; los umbrales se desplazan con el punto medio.
+ */
+#define PUNTO_MINIMO -10
+#define PUNTO_MAXIMO 60
+int16_t punto_medio = 22;
+int16_t temperatura = -2; /* -2: sin primera lectura. -1: error. */
 
-#define LCD_RS PB1 /* Arduino D9. */
-#define LCD_E PB2  /* Arduino D10. Datos: A0..A3. */
+/* volatile indica que la variable puede cambiar en una interrupcion. */
+volatile uint8_t medir = 0;
 
-void leds_iniciar(void)
+/* Timer1 genera una interrupcion por segundo. */
+ISR(TIMER1_COMPA_vect)
 {
-    PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
-    DDRD |= (1 << LED_1) | (1 << LED_2) | (1 << LED_3);
-}
-
-void ventilador(uint8_t nivel)
-{
-    /* Nivel 0: ninguno; 1: un LED; 2: dos; 3: los tres. */
-    PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
-    if (nivel >= 1) PORTD |= (1 << LED_1);
-    if (nivel >= 2) PORTD |= (1 << LED_2);
-    if (nivel >= 3) PORTD |= (1 << LED_3);
-}
-
-/* Poner a cero antes de configurar evita encendidos al iniciar. */
-void salidas_iniciar(void)
-{
-    PORTB &= ~(1 << CALEFACTOR_PIN);
-    DDRB |= (1 << CALEFACTOR_PIN);
-    leds_iniciar();
+    static uint8_t segundos = 0;
+    segundos++;
+    if (segundos == 5) {
+        segundos = 0;
+        medir = 1;
+    }
 }
 
 void serie_iniciar(void)
@@ -69,6 +74,9 @@ void serie_texto(const char *texto)
     }
 }
 
+/* Convierte un entero a texto decimal sin depender de itoa.
+ * El arreglo de salida debe tener espacio para 7 caracteres.
+ */
 void numero_a_texto(int16_t numero, char *texto)
 {
     char digitos[5];
@@ -102,30 +110,7 @@ void serie_numero(int16_t numero)
     serie_texto(texto);
 }
 
-/* La interrupcion avisa; el trabajo se hace en main. */
-volatile uint8_t medir = 0;
-
-ISR(TIMER1_COMPA_vect)
-{
-    static uint8_t segundos = 0;
-    segundos++;
-    if (segundos == 5) {
-        segundos = 0;
-        medir = 1;
-    }
-}
-
-void temporizador_iniciar(void)
-{
-    TCCR1A = 0;
-    TCCR1B = 0;
-    TCNT1 = 0;
-    OCR1A = F_CPU / 256UL - 1; /* Un segundo a 8 o 16 MHz. */
-    TIFR1 = (1 << OCF1A);
-    TIMSK1 = (1 << OCIE1A);
-    /* Modo CTC: cuenta hasta OCR1A y vuelve a cero. Divisor: 256. */
-    TCCR1B = (1 << WGM12) | (1 << CS12);
-}
+/* ---------------- PANTALLA LCD EN MODO DE 4 BITS ---------------- */
 
 void lcd_4bits(uint8_t dato)
 {
@@ -219,7 +204,36 @@ void lcd_actualizar(void)
     lcd_texto("C");
 }
 
-/* Esperas limitadas: un sensor ausente no bloquea el programa. */
+void temporizador_iniciar(void)
+{
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    OCR1A = F_CPU / 256UL - 1; /* Un segundo a 8 o 16 MHz. */
+    TIFR1 = (1 << OCF1A);
+    TIMSK1 = (1 << OCIE1A);
+    /* Modo CTC: cuenta hasta OCR1A y vuelve a cero. Divisor: 256. */
+    TCCR1B = (1 << WGM12) | (1 << CS12);
+}
+
+void leds_iniciar(void)
+{
+    PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
+    DDRD |= (1 << LED_1) | (1 << LED_2) | (1 << LED_3);
+}
+
+void ventilador(uint8_t nivel)
+{
+    /* Nivel 0: ninguno; 1: un LED; 2: dos; 3: los tres. */
+    PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
+    if (nivel >= 1) PORTD |= (1 << LED_1);
+    if (nivel >= 2) PORTD |= (1 << LED_2);
+    if (nivel >= 3) PORTD |= (1 << LED_3);
+}
+
+/* Espera un nivel del DHT11. Devuelve 0 si el sensor no responde.
+ * El limite evita que el programa se quede bloqueado indefinidamente.
+ */
 uint8_t dht_esperar(uint8_t nivel)
 {
     uint8_t intentos = 0;
@@ -232,7 +246,11 @@ uint8_t dht_esperar(uint8_t nivel)
     return 1;
 }
 
-/* Recibe 40 bits y verifica la suma. Usa la temperatura entera. */
+/* Devuelve la temperatura entera, o -1 si falla la comunicacion.
+ * Se llama con interrupciones deshabilitadas para respetar los pulsos.
+ * El DHT11 entrega 5 bytes: humedad, decimal, temperatura, decimal,
+ * y suma de comprobacion. Aqui usamos solo la temperatura entera.
+ */
 int16_t dht11_leer(void)
 {
     uint8_t datos[5] = {0, 0, 0, 0, 0};
@@ -306,24 +324,163 @@ void controlar_temperatura(void)
     }
 }
 
+/* ---------------- MENU POR EL PUERTO SERIE ---------------- */
+
+void mostrar_rangos(void)
+{
+    serie_texto("\r\nPunto medio: ");
+    serie_numero(punto_medio);
+    serie_texto(" C\r\nCalefactor: T < ");
+    serie_numero(punto_medio - 6);
+    serie_texto(" C\r\nRango medio: ");
+    serie_numero(punto_medio - 6);
+    serie_texto(" a ");
+    serie_numero(punto_medio + 6);
+    serie_texto(" C\r\nBajo (1 LED): ");
+    serie_numero(punto_medio + 7);
+    serie_texto(" a ");
+    serie_numero(punto_medio + 17);
+    serie_texto(" C\r\nMedio (2 LED): ");
+    serie_numero(punto_medio + 18);
+    serie_texto(" a ");
+    serie_numero(punto_medio + 28);
+    serie_texto(" C\r\nAlto (3 LED): desde ");
+    serie_numero(punto_medio + 29);
+    serie_texto(" C\r\n");
+}
+
+void mostrar_menu(void)
+{
+    serie_texto("\r\n--- MENU DE TEMPERATURA ---\r\n");
+    serie_texto("Escribir punto medio (-10 a 60) y pulsar Enter.\r\n");
+    serie_texto("Ejemplo: 25 seguido de Enter.\r\n");
+    serie_texto("r: restaurar 22 C | m: ver menu y rangos\r\n");
+    serie_texto("Retroceso: borrar digito | Escape: cancelar entrada\r\n");
+    mostrar_rangos();
+}
+
+void atender_menu(void)
+{
+    /* static conserva lo escrito entre una llamada y la siguiente.
+     * Guarda hasta dos digitos y un signo menos opcional al principio.
+     */
+    static char entrada[3];
+    static uint8_t cantidad = 0;
+    static uint8_t entrada_invalida = 0;
+    char opcion;
+    char eco[2];
+    uint8_t estado;
+    uint8_t i;
+    uint8_t inicio = 0;
+    int16_t nuevo_punto = 0;
+    uint8_t cambio = 0;
+
+    /* No bloquea esperando Enter; las mediciones siguen funcionando. */
+    if (!(UCSR0A & (1 << RXC0))) return;
+    estado = UCSR0A;
+    opcion = UDR0;
+    if (estado & ((1 << FE0) | (1 << DOR0) | (1 << UPE0))) {
+        /* Si se pierde un caracter, nunca aplicar un numero incompleto. */
+        entrada_invalida = 1;
+        serie_texto("\r\nError de recepcion: Escape y escribir otra vez.\r\n");
+        return;
+    }
+
+    if (opcion == 27) { /* Escape cancela, sin cambiar el punto medio. */
+        cantidad = 0;
+        entrada_invalida = 0;
+        serie_texto("\r\nEntrada cancelada.\r\n");
+        return;
+    }
+
+    if (opcion == '\r' || opcion == '\n') {
+        /* Ignora lineas vacias y el segundo caracter de un Enter CR+LF. */
+        if (cantidad == 0 && !entrada_invalida) return;
+        serie_texto("\r\n");
+        if (cantidad > 0 && entrada[0] == '-') inicio = 1;
+        if (inicio == 1 && cantidad == 1) entrada_invalida = 1;
+        for (i = inicio; i < cantidad; i++) {
+            nuevo_punto = nuevo_punto * 10 + (entrada[i] - '0');
+        }
+        if (inicio == 1) nuevo_punto = -nuevo_punto;
+        if (entrada_invalida || nuevo_punto < PUNTO_MINIMO ||
+            nuevo_punto > PUNTO_MAXIMO) {
+            serie_texto("Valor invalido. Escribir un entero de -10 a 60.\r\n");
+        } else {
+            punto_medio = nuevo_punto;
+            cambio = 1;
+        }
+        cantidad = 0;
+        entrada_invalida = 0;
+    } else if (opcion == '\b' || opcion == 127) {
+        if (cantidad > 0 && !entrada_invalida) {
+            cantidad--;
+            serie_texto("\b \b");
+        }
+    } else if (opcion == '-' && cantidad == 0 && !entrada_invalida) {
+        entrada[cantidad++] = '-'; /* Solo permite el signo al comienzo. */
+        serie_texto("-");
+    } else if (opcion >= '0' && opcion <= '9') {
+        if (cantidad > 0 && entrada[0] == '-') inicio = 1;
+        if (cantidad < 2 + inicio && !entrada_invalida) {
+            entrada[cantidad++] = opcion;
+            eco[0] = opcion;
+            eco[1] = '\0';
+            serie_texto(eco); /* Permite ver los digitos escritos. */
+        } else {
+            entrada_invalida = 1; /* Rechaza numeros demasiado largos. */
+        }
+    } else if ((opcion == 'r' || opcion == 'R') &&
+               cantidad == 0 && !entrada_invalida) {
+        punto_medio = 22;
+        cambio = 1;
+    } else if ((opcion == 'm' || opcion == 'M') &&
+               cantidad == 0 && !entrada_invalida) {
+        mostrar_menu();
+    } else {
+        /* Rechaza letras, signos fuera de lugar y decimales. */
+        entrada_invalida = 1;
+    }
+
+    if (cambio) {
+        serie_texto("Punto medio actualizado: ");
+        serie_numero(punto_medio);
+        serie_texto(" C\r\n");
+        /* Aplica la ultima lectura sin reiniciar el temporizador. */
+        controlar_temperatura();
+        lcd_actualizar();
+        mostrar_rangos();
+    }
+}
+
 int main(void)
 {
-    salidas_iniciar();
+
+    PORTB &= ~(1 << CALEFACTOR_PIN);
+    DDRB |= (1 << CALEFACTOR_PIN);
     DDRD &= ~(1 << DHT_PIN);
+
     serie_iniciar();
+    leds_iniciar();
     lcd_iniciar();
     lcd_actualizar();
-    serie_texto("Punto medio fijo: 22 C. Primera lectura en 5 s.\r\n");
+    mostrar_menu();
+    serie_texto("Primera medicion en 5 segundos.\r\n");
     temporizador_iniciar();
-    sei();
+    sei(); /* Habilita las interrupciones. */
+
     while (1) {
+        atender_menu();
         if (medir) {
             medir = 0;
-            cli(); /* Evita que una interrupcion altere los pulsos del DHT11. */
+            cli(); /* Protege los tiempos cortos del protocolo DHT11. */
             temperatura = dht11_leer();
             sei();
+
             controlar_temperatura();
             lcd_actualizar();
         }
     }
 }
+
+
