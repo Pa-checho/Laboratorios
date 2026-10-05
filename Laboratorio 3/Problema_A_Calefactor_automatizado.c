@@ -1,4 +1,4 @@
-/* Etapa 2: Agregar el puerto serie.
+/* Etapa 3: Usar Timer1 cada 5 segundos.
  * C para ATmega328P / Arduino Uno R3 a 16 MHz.
  * Cada archivo es un programa completo: compilar SOLO una etapa.
  * LED: D4/PD4, D5/PD5, D6/PD6 y calefactor D8/PB0.
@@ -94,6 +94,31 @@ void serie_numero(int16_t numero)
     serie_texto(texto);
 }
 
+/* La interrupcion avisa; el trabajo se hace en main. */
+volatile uint8_t medir = 0;
+
+ISR(TIMER1_COMPA_vect)
+{
+    static uint8_t segundos = 0;
+    segundos++;
+    if (segundos == 5) {
+        segundos = 0;
+        medir = 1;
+    }
+}
+
+void temporizador_iniciar(void)
+{
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    OCR1A = F_CPU / 256UL - 1; /* Un segundo a 8 o 16 MHz. */
+    TIFR1 = (1 << OCF1A);
+    TIMSK1 = (1 << OCIE1A);
+    /* Modo CTC: cuenta hasta OCR1A y vuelve a cero. Divisor: 256. */
+    TCCR1B = (1 << WGM12) | (1 << CS12);
+}
+
 /* Secuencia de prueba: calefactor, reposo, bajo, medio y alto.
  * Todavia NO representa una temperatura medida.
  */
@@ -120,10 +145,13 @@ int main(void)
     salidas_iniciar();
     serie_iniciar();
     serie_texto("Prueba de salidas, sin sensor.\r\n");
+    temporizador_iniciar();
+    sei(); /* Permite ejecutar la interrupcion de Timer1. */
     while (1) {
+        if (!medir) continue; /* Sigue revisando la bandera. */
+        medir = 0;
         mostrar_paso(paso);
         informar_paso(paso);
-        _delay_ms(1000); /* Espera bloqueante, solo para esta prueba. */
         paso++;
         if (paso == 5) paso = 0; /* Repite la secuencia. */
     }
