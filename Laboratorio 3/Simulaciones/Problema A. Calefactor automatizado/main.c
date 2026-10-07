@@ -6,6 +6,7 @@
  * DHT11 DATA: PD2, con resistencia de 4,7 kOhm a VCC.
  * Calefactor: LED en PB0. Ventilador: LED 1/2/3 en PD4/PD5/PD6.
  * Cada LED lleva una resistencia de 330 ohm y su catodo a GND.
+ * Motor: PWM en PD3 (Arduino D3), mediante MOSFET y fuente externa de 5 V.
  * LCD 16x2 HD44780: RS=PB1, E=PB2, D4..D7=PC0..PC3, RW=GND.
  * Serie TX: PD1 hacia RX del terminal. RX: PD0 desde TX del terminal.
  * Serie: 9600 baudios, 8 bits, sin paridad, 1 bit de parada.
@@ -28,6 +29,39 @@
 #define LED_3 PD6
 #define LCD_RS PB1
 #define LCD_E PB2
+#define MOTOR_PIN PD3 /* Arduino D3 / OC2B: hacia MOSFET, nunca al motor directo. */
+
+/* Fast PWM de 8 bits: (OCR2B + 1) / 256. Ajustables tras probar el motor. */
+#define PWM_BAJO 127  /* 50% de tiempo encendido. No significa 50% de RPM. */
+#define PWM_MEDIO 191 /* 75% de tiempo encendido. */
+
+void motor_iniciar(void)
+{
+    PORTD &= ~(1 << MOTOR_PIN);
+    DDRD |= (1 << MOTOR_PIN);
+    TCCR2A = (1 << WGM21) | (1 << WGM20); /* Fast PWM, salida desconectada. */
+    TCCR2B = 0;
+    TCNT2 = 0;
+    OCR2B = 0;
+    TIMSK2 = 0; /* El PWM se genera por hardware, sin interrupciones. */
+    TCCR2B = (1 << CS22); /* Divisor 64: 16 MHz / 64 / 256 = 976,56 Hz. */
+}
+
+void motor_nivel(uint8_t nivel)
+{
+    if (nivel == 0 || nivel >= 3) {
+        /* Niveles extremos: desconecta PWM para obtener 0% o 100% reales. */
+        TCCR2A &= ~((1 << COM2B1) | (1 << COM2B0));
+        OCR2B = 0;
+        if (nivel == 0) PORTD &= ~(1 << MOTOR_PIN);
+        else PORTD |= (1 << MOTOR_PIN);
+    } else {
+        if (nivel == 1) OCR2B = PWM_BAJO;
+        else OCR2B = PWM_MEDIO;
+        TCCR2A &= ~(1 << COM2B0);
+        TCCR2A |= (1 << COM2B1); /* PWM no invertido en OC2B. */
+    }
+}
 
 /* El rango medio es punto_medio - 6 hasta punto_medio + 6.
  * Inicialmente: 22 - 6 = 16 C y 22 + 6 = 28 C.
@@ -228,6 +262,7 @@ void leds_iniciar(void)
 
 void ventilador(uint8_t nivel)
 {
+    motor_nivel(nivel); /* Motor y LED siempre reciben el mismo nivel. */
     /* Nivel 0: ninguno; 1: un LED; 2: dos; 3: los tres. */
     PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
     if (nivel >= 1) PORTD |= (1 << LED_1);
@@ -317,14 +352,14 @@ void controlar_temperatura(void)
         serie_texto("Calefactor apagado | Ventilador apagado\r\n");
     } else if (temperatura <= punto_medio + 17) {
         ventilador(1);
-        serie_texto("Calefactor apagado | Ventilador BAJO: 1 LED\r\n");
+        serie_texto("Calefactor apagado | Ventilador BAJO: 1 LED, PWM 50%\r\n");
     } else if (temperatura <= punto_medio + 28) {
         ventilador(2);
-        serie_texto("Calefactor apagado | Ventilador MEDIO: 2 LED\r\n");
+        serie_texto("Calefactor apagado | Ventilador MEDIO: 2 LED, PWM 75%\r\n");
     } else {
         /* Con punto medio 22, el nivel alto empieza en 51 C. */
         ventilador(3);
-        serie_texto("Calefactor apagado | Ventilador ALTO: 3 LED\r\n");
+        serie_texto("Calefactor apagado | Ventilador ALTO: 3 LED, PWM 100%\r\n");
     }
 }
 
@@ -468,7 +503,7 @@ void atender_menu(void)
 
 int main(void)
 {
-
+    motor_iniciar(); /* Arranca apagado; Timer1 queda libre para las mediciones. */
     PORTB &= ~(1 << CALEFACTOR_PIN);
     DDRB |= (1 << CALEFACTOR_PIN);
     DDRD &= ~(1 << DHT_PIN);
