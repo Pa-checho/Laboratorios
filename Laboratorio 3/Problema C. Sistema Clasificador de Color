@@ -1,10 +1,14 @@
-// Bloque 1: inicializacion y medicion RGB mediante LDR y matriz WS2812.
-// Monitor Serie: 9600 baudios. Cada pulsacion muestra una lectura RGB.
+// Bloque 2: calibracion de cuatro colores y persistencia en EEPROM.
+// Monitor Serie: 9600 baudios, con fin de linea para enviar comandos.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_NeoPixel.h>
+#include <EEPROM.h>
+#include <stddef.h>
+#include <string.h>
+#include <ctype.h>
 
 // ---------- Pines y componentes ----------
 const byte PIN_LDR   = A0;
@@ -16,6 +20,8 @@ const byte BRILLO = 100;
 const byte CANTIDAD_PIXELES = 64; // Matriz 8x8
 const byte LED_SENSOR = 0;       // Pixel usado durante la medicion
 const byte MUESTRAS_LDR = 24;
+const byte CANTIDAD_COLORES = 4;
+const byte CANTIDAD_REFERENCIAS = 4;
 
 // ---------- Objetos y estado ----------
 LiquidCrystal_I2C lcd(DIRECCION_LCD, 16, 2);
@@ -25,9 +31,55 @@ Adafruit_NeoPixel led(
   NEO_GRB + NEO_KHZ800
 );
 
+// ---------- Calibracion guardada en EEPROM ----------
+struct Calibracion {
+  uint16_t firma;
+  byte version;
+  byte brillo;
+  uint16_t referencia[CANTIDAD_REFERENCIAS][3];
+  uint16_t crc;
+};
+
+const uint16_t FIRMA_CALIBRACION = 0xC031;
+const byte VERSION_CALIBRACION = 4;
+
+Calibracion calibracion;
+Calibracion candidata;
+
 bool lcdDisponible = false;
+bool calibrado = false;
+bool comandoLargo = false;
 bool botonYaAtendido = false;
+byte modo = 0; // 0: menu y lectura cruda; 1: calibracion.
+byte pasoCal = 0;
 uint16_t lectura[3] = {0, 0, 0};
+char comando[64];
+size_t longitud = 0;
+
+const char *NOMBRES[CANTIDAD_COLORES] = {
+  "ROJO", "VERDE", "AZUL", "AMARILLO"
+};
+
+const char *nombre(byte codigo) {
+  if (codigo < CANTIDAD_COLORES) return NOMBRES[codigo];
+  return "SIN MUESTRA";
+}
+
+uint16_t calcularCRC(const Calibracion &datos) {
+  const byte *bytes = reinterpret_cast<const byte *>(&datos);
+  uint16_t crc = 0xFFFF;
+
+  for (size_t i = 0; i < offsetof(Calibracion, crc); i++) {
+    crc ^= bytes[i];
+
+    for (byte bit = 0; bit < 8; bit++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else crc >>= 1;
+    }
+  }
+
+  return crc;
+}
 
 // ---------- Pantalla e iluminacion ----------
 void pantalla(const char *linea1, const char *linea2) {
@@ -117,6 +169,148 @@ void mostrarLectura() {
   pantalla("Lectura RGB lista", "Ver datos Serial");
 }
 
+// ---------- Menu y calibracion ----------
+void mostrarMenu() {
+  modo = 0;
+  iluminarTodos(0, 0, 0);
+
+  Serial.println();
+  Serial.println(F("=== CALIBRACION DE COLORES ==="));
+  Serial.println(F("  calibrar    para calibrar los 4 colores"));
+  Serial.println(F("  listo       para tomar el patron solicitado"));
+  Serial.println(F("  referencias para ver la calibracion"));
+  Serial.println(F("  menu        para volver o cancelar la calibracion"));
+  Serial.println(F("En el menu, el boton permite consultar una lectura RGB."));
+  pantalla("Calibracion RGB", "Ver menu Serial");
+}
+
+void pedirMuestra() {
+  if (pasoCal >= CANTIDAD_COLORES) return;
+
+  Serial.println();
+  Serial.print(F("Coloque una muestra "));
+  Serial.print(nombre(pasoCal));
+  Serial.println(F(" y escriba listo."));
+  pantalla("Calibrar:", nombre(pasoCal));
+}
+
+void tomarPatron() {
+  if (pasoCal >= CANTIDAD_COLORES) return;
+
+  Serial.print(F("Midiendo patron "));
+  Serial.println(nombre(pasoCal));
+  pantalla("Midiendo patron", nombre(pasoCal));
+  medirRGB(lectura);
+
+  for (byte canal = 0; canal < 3; canal++) {
+    candidata.referencia[pasoCal][canal] = lectura[canal];
+  }
+
+  Serial.print(F("Referencia guardada: "));
+  Serial.println(nombre(pasoCal));
+  pasoCal++;
+
+  if (pasoCal < CANTIDAD_COLORES) {
+    pedirMuestra();
+    return;
+  }
+
+  // Reemplaza la calibracion anterior solo al completar los cuatro patrones.
+  candidata.firma = FIRMA_CALIBRACION;
+  candidata.version = VERSION_CALIBRACION;
+  candidata.brillo = BRILLO;
+  candidata.crc = calcularCRC(candidata);
+  calibracion = candidata;
+  EEPROM.put(0, calibracion);
+  calibrado = true;
+  modo = 0;
+
+  Serial.println(F("Calibracion completa y guardada en EEPROM."));
+  pantalla("Calibracion", "completa");
+}
+
+void imprimirReferencias() {
+  if (!calibrado) {
+    Serial.println(F("Todavia no hay una calibracion valida."));
+    return;
+  }
+
+  Serial.println();
+  Serial.println(F("=== REFERENCIAS RGB ==="));
+  for (byte patron = 0; patron < CANTIDAD_REFERENCIAS; patron++) {
+    Serial.print(nombre(patron));
+    Serial.print(F(": R="));
+    Serial.print(calibracion.referencia[patron][0]);
+    Serial.print(F(" G="));
+    Serial.print(calibracion.referencia[patron][1]);
+    Serial.print(F(" B="));
+    Serial.println(calibracion.referencia[patron][2]);
+  }
+}
+
+// ---------- Comandos por Monitor Serie ----------
+void procesarComando(char *texto) {
+  while (*texto == ' ') texto++;
+
+  size_t n = strlen(texto);
+  while (n && texto[n - 1] == ' ') texto[--n] = 0;
+  for (size_t i = 0; i < n; i++) {
+    texto[i] = tolower((unsigned char)texto[i]);
+  }
+
+  if (!n) return;
+
+  if (!strcmp(texto, "menu")) {
+    mostrarMenu();
+    return;
+  }
+
+  if (!strcmp(texto, "referencias")) {
+    imprimirReferencias();
+    return;
+  }
+
+  if (!strcmp(texto, "calibrar") || !strcmp(texto, "1")) {
+    modo = 1;
+    pasoCal = 0;
+    memset(&candidata, 0, sizeof(candidata));
+    iluminarTodos(0, 0, 0);
+    pedirMuestra();
+    return;
+  }
+
+  if (modo == 1 && !strcmp(texto, "listo")) {
+    tomarPatron();
+    return;
+  }
+
+  Serial.println(F("Comando no valido. Use calibrar, listo, referencias o menu."));
+}
+
+void leerComandos() {
+  while (Serial.available()) {
+    char caracter = Serial.read();
+
+    if (caracter == '\n' || caracter == '\r') {
+      if (comandoLargo) {
+        Serial.println(F("Comando demasiado largo. Escribalo de nuevo."));
+      } else if (longitud > 0) {
+        comando[longitud] = 0;
+        procesarComando(comando);
+      }
+
+      longitud = 0;
+      comandoLargo = false;
+    } else if (caracter == 8 || caracter == 127) {
+      if (longitud) longitud--;
+    } else if (longitud < sizeof(comando) - 1) {
+      comando[longitud++] = caracter;
+    } else {
+      comandoLargo = true;
+    }
+  }
+}
+
 // ---------- Inicio y ciclo principal ----------
 void setup() {
   Serial.begin(9600);
@@ -145,13 +339,27 @@ void setup() {
     Serial.println(F("LCD sin respuesta: revise direccion y cables."));
   }
 
-  Serial.println(F("=== LECTURA RGB ==="));
-  Serial.println(F("Coloque una muestra y presione el boton para medir."));
-  pantalla("Listo para medir", "Presione boton");
+  EEPROM.get(0, calibracion);
+  calibrado =
+    calibracion.firma == FIRMA_CALIBRACION &&
+    calibracion.version == VERSION_CALIBRACION &&
+    calibracion.brillo == BRILLO &&
+    calibracion.crc == calcularCRC(calibracion);
+
+  mostrarMenu();
+  if (calibrado) {
+    Serial.println(F("Calibracion recuperada de EEPROM."));
+  } else {
+    Serial.println(F("Sin calibracion valida. Escriba calibrar para comenzar."));
+  }
 }
 
 void loop() {
-  if (botonPresionado()) {
+  leerComandos();
+
+  // Durante la calibracion, las muestras se toman solo con el comando listo.
+  bool presionado = botonPresionado();
+  if (modo == 0 && presionado) {
     pantalla("MIDIENDO RGB...", "Mantenga muestra");
     Serial.println(F("Midiendo muestra..."));
     medirRGB(lectura);
