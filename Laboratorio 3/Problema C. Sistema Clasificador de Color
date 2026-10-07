@@ -1,1 +1,160 @@
+// Bloque 1: inicializacion y medicion RGB mediante LDR y matriz WS2812.
+// Monitor Serie: 9600 baudios. Cada pulsacion muestra una lectura RGB.
 
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Adafruit_NeoPixel.h>
+
+// ---------- Pines y componentes ----------
+const byte PIN_LDR   = A0;
+const byte PIN_LED   = 6;   // DIN de la matriz WS2812
+const byte PIN_BOTON = 2;
+
+const byte DIRECCION_LCD = 0x27;
+const byte BRILLO = 100;
+const byte CANTIDAD_PIXELES = 64; // Matriz 8x8
+const byte LED_SENSOR = 0;       // Pixel usado durante la medicion
+const byte MUESTRAS_LDR = 24;
+
+// ---------- Objetos y estado ----------
+LiquidCrystal_I2C lcd(DIRECCION_LCD, 16, 2);
+Adafruit_NeoPixel led(
+  CANTIDAD_PIXELES,
+  PIN_LED,
+  NEO_GRB + NEO_KHZ800
+);
+
+bool lcdDisponible = false;
+bool botonYaAtendido = false;
+uint16_t lectura[3] = {0, 0, 0};
+
+// ---------- Pantalla e iluminacion ----------
+void pantalla(const char *linea1, const char *linea2) {
+  if (!lcdDisponible) return;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(linea1);
+  lcd.setCursor(0, 1);
+  lcd.print(linea2);
+}
+
+// Enciende un solo pixel durante la medicion y apaga los demas.
+void iluminarUnLed(byte rojo, byte verde, byte azul) {
+  for (byte i = 0; i < CANTIDAD_PIXELES; i++) {
+    led.setPixelColor(i, 0);
+  }
+
+  led.setPixelColor(LED_SENSOR, led.Color(rojo, verde, azul));
+  led.show();
+}
+
+void iluminarTodos(byte rojo, byte verde, byte azul) {
+  uint32_t color = led.Color(rojo, verde, azul);
+
+  for (byte i = 0; i < CANTIDAD_PIXELES; i++) {
+    led.setPixelColor(i, color);
+  }
+
+  led.show();
+}
+
+// El circuito RC filtra el rebote.
+// Evita repetir la lectura mientras se mantiene apretado el boton.
+bool botonPresionado() {
+  if (digitalRead(PIN_BOTON) == HIGH) {
+    botonYaAtendido = false;
+    return false;
+  }
+
+  if (!botonYaAtendido) {
+    botonYaAtendido = true;
+    return true;
+  }
+
+  return false;
+}
+
+// Ilumina con rojo, verde y azul y promedia 24 lecturas por canal.
+void medirRGB(uint16_t destino[3]) {
+  const byte colores[3][3] = {
+    {BRILLO, 0, 0},
+    {0, BRILLO, 0},
+    {0, 0, BRILLO}
+  };
+
+  for (byte color = 0; color < 3; color++) {
+    iluminarUnLed(
+      colores[color][0],
+      colores[color][1],
+      colores[color][2]
+    );
+
+    delay(250);
+
+    uint32_t suma = 0;
+    for (byte i = 0; i < MUESTRAS_LDR; i++) {
+      suma += analogRead(PIN_LDR);
+      delay(10);
+    }
+
+    destino[color] = suma / MUESTRAS_LDR;
+  }
+
+  iluminarTodos(0, 0, 0);
+}
+
+// En esta etapa se muestran las lecturas crudas para comprobar el sensor.
+void mostrarLectura() {
+  Serial.print(F("Lectura RGB: R="));
+  Serial.print(lectura[0]);
+  Serial.print(F(" G="));
+  Serial.print(lectura[1]);
+  Serial.print(F(" B="));
+  Serial.println(lectura[2]);
+
+  pantalla("Lectura RGB lista", "Ver datos Serial");
+}
+
+// ---------- Inicio y ciclo principal ----------
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(PIN_LDR, INPUT);
+  pinMode(PIN_BOTON, INPUT); // Pull-up externo de 10 kOhm y filtro RC.
+  analogReference(DEFAULT);
+
+  led.begin();
+  led.setBrightness(255);
+  iluminarTodos(0, 0, 0);
+
+  Wire.begin();
+
+#if defined(WIRE_HAS_TIMEOUT)
+  Wire.setWireTimeout(25000, true);
+#endif
+
+  Wire.beginTransmission(DIRECCION_LCD);
+  lcdDisponible = (Wire.endTransmission() == 0);
+
+  if (lcdDisponible) {
+    lcd.begin();
+    lcd.backlight();
+  } else {
+    Serial.println(F("LCD sin respuesta: revise direccion y cables."));
+  }
+
+  Serial.println(F("=== LECTURA RGB ==="));
+  Serial.println(F("Coloque una muestra y presione el boton para medir."));
+  pantalla("Listo para medir", "Presione boton");
+}
+
+void loop() {
+  if (botonPresionado()) {
+    pantalla("MIDIENDO RGB...", "Mantenga muestra");
+    Serial.println(F("Midiendo muestra..."));
+    medirRGB(lectura);
+    mostrarLectura();
+  }
+}
