@@ -1,40 +1,46 @@
-// Clasificador de colores: medicion RGB, calibracion EEPROM y control del servo.
-// Monitor Serie: 9600 baudios, con fin de linea para enviar comandos.
-
 #include <Arduino.h>
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include "DFRobot_LCD.h"
 #include <Adafruit_NeoPixel.h>
 #include <Servo.h>
 #include <EEPROM.h>
 #include <stddef.h>
 #include <string.h>
 #include <ctype.h>
-#include <stdio.h>
 
 // ---------- Pines y componentes ----------
-const byte PIN_LDR   = A0;
-const byte PIN_LED   = 6;   // DIN de la matriz WS2812
+const byte PIN_LDR = A0;
+const byte PIN_LED = 6;
 const byte PIN_SERVO = 9;
 const byte PIN_BOTON = 2;
 
-const byte DIRECCION_LCD = 0x27;
-const byte BRILLO = 100;
-const byte CANTIDAD_PIXELES = 64; // Matriz 8x8
-const byte LED_SENSOR = 0;       // Pixel usado durante la medicion
-const byte MUESTRAS_LDR = 24;
-const byte CANTIDAD_COLORES = 4;
-const byte CANTIDAD_REFERENCIAS = 4;
-const byte PATRON_SIN_MUESTRA = 4;
-const uint16_t TOLERANCIA_CANAL = 40;
+const byte BRILLO = 200;
+
 const unsigned int SERVO_MIN_US = 544;
 const unsigned int SERVO_MAX_US = 2400;
+
+const byte CANTIDAD_PIXELES = 64;
+const byte LED_SENSOR = 0;
+
+const byte CANTIDAD_COLORES = 4;
+const byte SIN_MUESTRA = 4;
 const int ANGULO_SIN_MUESTRA = 90;
-// Angulos para rojo, verde, azul y amarillo.
+
+const byte MUESTRAS_LDR = 24;
+const uint16_t TOLERANCIA_CANAL = 50;
+
 const byte ANGULOS[CANTIDAD_COLORES] = {0, 65, 115, 180};
 
-// ---------- Objetos y estado ----------
-LiquidCrystal_I2C lcd(DIRECCION_LCD, 16, 2);
+// Colores de la matriz para rojo, verde, azul y amarillo.
+const byte COLORES_LED[CANTIDAD_COLORES][3] = {
+  {BRILLO, 0, 0},
+  {0, BRILLO, 0},
+  {0, 0, BRILLO},
+  {BRILLO, BRILLO, 0}
+};
+
+// ---------- Objetos ----------
+DFRobot_LCD lcd(16, 2);
 Adafruit_NeoPixel led(
   CANTIDAD_PIXELES,
   PIN_LED,
@@ -42,12 +48,12 @@ Adafruit_NeoPixel led(
 );
 Servo bandeja;
 
-// ---------- Calibracion guardada en EEPROM ----------
+// ---------- Calibración guardada en EEPROM ----------
 struct Calibracion {
   uint16_t firma;
   byte version;
   byte brillo;
-  uint16_t referencia[CANTIDAD_REFERENCIAS][3];
+  uint16_t referencia[CANTIDAD_COLORES][3];
   uint16_t crc;
 };
 
@@ -57,47 +63,38 @@ const byte VERSION_CALIBRACION = 4;
 Calibracion calibracion;
 Calibracion candidata;
 
+// ---------- Estado del programa ----------
 bool lcdDisponible = false;
 bool calibrado = false;
-bool hayResultado = false;
 bool comandoLargo = false;
 bool botonYaAtendido = false;
-byte modo = 0; // 0: menu; 1: calibracion; 2: deteccion.
+
+byte modo = 0; // 0 = menú, 1 = calibración, 2 = detección
 byte pasoCal = 0;
-byte resultado = PATRON_SIN_MUESTRA;
+byte resultado = SIN_MUESTRA;
 byte masCercano = 0;
-int anguloActual = ANGULO_SIN_MUESTRA;
+
+int anguloActual = 90;
+
 uint16_t lectura[3] = {0, 0, 0};
+
 char comando[64];
 size_t longitud = 0;
-char abajo[17];
+char lineaLCD[17];
 
-const char *NOMBRES[CANTIDAD_COLORES] = {
-  "ROJO", "VERDE", "AZUL", "AMARILLO"
+const char *NOMBRES[5] = {
+  "ROJO",
+  "VERDE",
+  "AZUL",
+  "AMARILLO",
+  "SIN MUESTRA"
 };
 
+// ---------- Funciones auxiliares ----------
 const char *nombre(byte codigo) {
-  if (codigo < CANTIDAD_COLORES) return NOMBRES[codigo];
-  return "SIN MUESTRA";
+  return codigo < 5 ? NOMBRES[codigo] : "SIN MUESTRA";
 }
 
-uint16_t calcularCRC(const Calibracion &datos) {
-  const byte *bytes = reinterpret_cast<const byte *>(&datos);
-  uint16_t crc = 0xFFFF;
-
-  for (size_t i = 0; i < offsetof(Calibracion, crc); i++) {
-    crc ^= bytes[i];
-
-    for (byte bit = 0; bit < 8; bit++) {
-      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
-      else crc >>= 1;
-    }
-  }
-
-  return crc;
-}
-
-// ---------- Pantalla e iluminacion ----------
 void pantalla(const char *linea1, const char *linea2) {
   if (!lcdDisponible) return;
 
@@ -108,7 +105,6 @@ void pantalla(const char *linea1, const char *linea2) {
   lcd.print(linea2);
 }
 
-// Enciende un solo pixel durante la medicion y apaga los demas.
 void iluminarUnLed(byte rojo, byte verde, byte azul) {
   for (byte i = 0; i < CANTIDAD_PIXELES; i++) {
     led.setPixelColor(i, 0);
@@ -129,16 +125,14 @@ void iluminarTodos(byte rojo, byte verde, byte azul) {
 }
 
 void moverServo(int angulo) {
-  if (angulo < 0) angulo = 0;
-  if (angulo > 180) angulo = 180;
-
+  angulo = constrain(angulo, 0, 180);
   bandeja.write(angulo);
   anguloActual = angulo;
   delay(350);
 }
 
-// El circuito RC filtra el rebote.
-// Evita repetir la lectura mientras se mantiene apretado el boton.
+// El circuito RC filtra el rebote del botón.
+// Solo devuelve true una vez mientras el botón permanece presionado.
 bool botonPresionado() {
   if (digitalRead(PIN_BOTON) == HIGH) {
     botonYaAtendido = false;
@@ -153,46 +147,59 @@ bool botonPresionado() {
   return false;
 }
 
-// Ilumina con rojo, verde y azul y promedia 24 lecturas por canal.
+uint16_t calcularCRC(const Calibracion &datos) {
+  const byte *bytes = reinterpret_cast<const byte *>(&datos);
+  uint16_t crc = 0xFFFF;
+
+  for (size_t i = 0; i < offsetof(Calibracion, crc); i++) {
+    crc ^= bytes[i];
+
+    for (byte bit = 0; bit < 8; bit++) {
+      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+    }
+  }
+
+  return crc;
+}
+
+// Mide el LDR con luz roja, verde y azul, 24 veces por cada luz.
 void medirRGB(uint16_t destino[3]) {
-  const byte colores[3][3] = {
+  const byte luces[3][3] = {
     {BRILLO, 0, 0},
     {0, BRILLO, 0},
     {0, 0, BRILLO}
   };
 
-  for (byte color = 0; color < 3; color++) {
-    iluminarUnLed(
-      colores[color][0],
-      colores[color][1],
-      colores[color][2]
-    );
-
+  for (byte canal = 0; canal < 3; canal++) {
+    iluminarUnLed(luces[canal][0], luces[canal][1], luces[canal][2]);
     delay(250);
 
     uint32_t suma = 0;
+
     for (byte i = 0; i < MUESTRAS_LDR; i++) {
       suma += analogRead(PIN_LDR);
       delay(10);
     }
 
-    destino[color] = suma / MUESTRAS_LDR;
+    destino[canal] = suma / MUESTRAS_LDR;
   }
 
   iluminarTodos(0, 0, 0);
 }
 
-// Busca la referencia mas cercana y verifica la tolerancia en sus tres canales.
+// Busca el color más cercano y verifica que cada diferencia sea menor que 50.
 byte clasificar(const uint16_t valores[3], byte &cercano) {
   uint32_t mejorDistancia = 0xFFFFFFFFUL;
   byte mejorPatron = 0;
 
-  for (byte patron = 0; patron < CANTIDAD_REFERENCIAS; patron++) {
+  for (byte patron = 0; patron < CANTIDAD_COLORES; patron++) {
     uint32_t distancia = 0;
+
     for (byte canal = 0; canal < 3; canal++) {
       int32_t diferencia =
         (int32_t)valores[canal] -
         (int32_t)calibracion.referencia[patron][canal];
+
       distancia += (uint32_t)(diferencia * diferencia);
     }
 
@@ -203,31 +210,35 @@ byte clasificar(const uint16_t valores[3], byte &cercano) {
   }
 
   cercano = mejorPatron;
-  // Cada diferencia absoluta debe ser estrictamente menor que 40.
+
   for (byte canal = 0; canal < 3; canal++) {
     int32_t diferencia =
       (int32_t)valores[canal] -
       (int32_t)calibracion.referencia[mejorPatron][canal];
+
     if (diferencia < 0) diferencia = -diferencia;
-    if (diferencia >= TOLERANCIA_CANAL) return PATRON_SIN_MUESTRA;
+
+    if (diferencia >= TOLERANCIA_CANAL) {
+      return SIN_MUESTRA;
+    }
   }
 
   return mejorPatron;
 }
 
-// ---------- Menu y calibracion ----------
+// ---------- Menú y calibración ----------
 void mostrarMenu() {
   modo = 0;
-  hayResultado = false;
   iluminarTodos(0, 0, 0);
 
   Serial.println();
   Serial.println(F("=== CLASIFICADOR DE COLORES ==="));
-  Serial.println(F("  calibrar    para calibrar los 4 colores"));
+  Serial.println(F("Escriba:"));
+  Serial.println(F("  calibrar       para calibrar los 4 colores"));
   Serial.println(F("  detectar color para esperar el boton"));
-  Serial.println(F("  listo       para tomar el patron solicitado"));
-  Serial.println(F("  referencias para ver la calibracion"));
-  Serial.println(F("  menu        para volver o cancelar la calibracion"));
+  Serial.println(F("  referencias    para ver la calibracion"));
+  Serial.println(F("  menu           para volver al menu"));
+
   pantalla("Clasificador", "Ver menu Serial");
 }
 
@@ -238,6 +249,7 @@ void pedirMuestra() {
   Serial.print(F("Coloque una muestra "));
   Serial.print(nombre(pasoCal));
   Serial.println(F(" y escriba listo."));
+
   pantalla("Calibrar:", nombre(pasoCal));
 }
 
@@ -246,6 +258,7 @@ void tomarPatron() {
 
   Serial.print(F("Midiendo patron "));
   Serial.println(nombre(pasoCal));
+
   pantalla("Midiendo patron", nombre(pasoCal));
   medirRGB(lectura);
 
@@ -255,6 +268,7 @@ void tomarPatron() {
 
   Serial.print(F("Referencia guardada: "));
   Serial.println(nombre(pasoCal));
+
   pasoCal++;
 
   if (pasoCal < CANTIDAD_COLORES) {
@@ -262,11 +276,11 @@ void tomarPatron() {
     return;
   }
 
-  // Reemplaza la calibracion anterior solo al completar los cuatro patrones.
   candidata.firma = FIRMA_CALIBRACION;
   candidata.version = VERSION_CALIBRACION;
   candidata.brillo = BRILLO;
   candidata.crc = calcularCRC(candidata);
+
   calibracion = candidata;
   EEPROM.put(0, calibracion);
   calibrado = true;
@@ -284,7 +298,8 @@ void imprimirReferencias() {
 
   Serial.println();
   Serial.println(F("=== REFERENCIAS RGB ==="));
-  for (byte patron = 0; patron < CANTIDAD_REFERENCIAS; patron++) {
+
+  for (byte patron = 0; patron < CANTIDAD_COLORES; patron++) {
     Serial.print(nombre(patron));
     Serial.print(F(": R="));
     Serial.print(calibracion.referencia[patron][0]);
@@ -295,29 +310,27 @@ void imprimirReferencias() {
   }
 }
 
-// ---------- Resultado y deteccion ----------
+// ---------- Resultado y detección ----------
 void mostrarResultado() {
-  if (!hayResultado) return;
-
-  snprintf(abajo, sizeof(abajo), "Angulo: %d", anguloActual);
-  pantalla(nombre(resultado), abajo);
+  snprintf(lineaLCD, sizeof(lineaLCD), "Angulo: %d", anguloActual);
+  pantalla(nombre(resultado), lineaLCD);
 }
 
 void detectarColor() {
   pantalla("MIDIENDO RGB...", "Mantenga muestra");
   Serial.println(F("Midiendo muestra..."));
+
   medirRGB(lectura);
   resultado = clasificar(lectura, masCercano);
 
   if (resultado < CANTIDAD_COLORES) {
     moverServo(ANGULOS[resultado]);
-    // Enciende toda la matriz con el color reconocido.
-    switch (resultado) {
-      case 0: iluminarTodos(BRILLO, 0, 0); break;
-      case 1: iluminarTodos(0, BRILLO, 0); break;
-      case 2: iluminarTodos(0, 0, BRILLO); break;
-      case 3: iluminarTodos(BRILLO, BRILLO, 0); break;
-    }
+
+    iluminarTodos(
+      COLORES_LED[resultado][0],
+      COLORES_LED[resultado][1],
+      COLORES_LED[resultado][2]
+    );
   } else {
     moverServo(ANGULO_SIN_MUESTRA);
     iluminarTodos(0, 0, 0);
@@ -325,14 +338,15 @@ void detectarColor() {
 
   Serial.print(F("Resultado: "));
   Serial.println(nombre(resultado));
+
   Serial.print(F("Angulo aplicado: "));
   Serial.println(anguloActual);
 
-  if (resultado == PATRON_SIN_MUESTRA) {
-    Serial.print(F("Color calibrado mas cercano: "));
-  } else {
-    Serial.print(F("Patron usado: "));
-  }
+  Serial.print(
+    resultado == SIN_MUESTRA
+      ? F("Color calibrado mas cercano: ")
+      : F("Patron usado: ")
+  );
   Serial.println(nombre(masCercano));
 
   for (byte canal = 0; canal < 3; canal++) {
@@ -348,11 +362,10 @@ void detectarColor() {
     );
   }
 
-  if (resultado == PATRON_SIN_MUESTRA) {
+  if (resultado == SIN_MUESTRA) {
     Serial.println(F("Fuera del umbral: servo centrado a 90 grados."));
   }
 
-  hayResultado = true;
   mostrarResultado();
 }
 
@@ -362,6 +375,7 @@ void procesarComando(char *texto) {
 
   size_t n = strlen(texto);
   while (n && texto[n - 1] == ' ') texto[--n] = 0;
+
   for (size_t i = 0; i < n; i++) {
     texto[i] = tolower((unsigned char)texto[i]);
   }
@@ -370,44 +384,32 @@ void procesarComando(char *texto) {
 
   if (!strcmp(texto, "menu")) {
     mostrarMenu();
-    return;
-  }
-
-  if (!strcmp(texto, "referencias")) {
+  } else if (!strcmp(texto, "referencias")) {
     imprimirReferencias();
-    return;
-  }
-
-  if (!strcmp(texto, "calibrar") || !strcmp(texto, "1")) {
+  } else if (!strcmp(texto, "calibrar") || !strcmp(texto, "1")) {
     modo = 1;
-    hayResultado = false;
     pasoCal = 0;
     memset(&candidata, 0, sizeof(candidata));
     iluminarTodos(0, 0, 0);
     pedirMuestra();
-    return;
-  }
-
-  if (!strcmp(texto, "detectar color") || !strcmp(texto, "2")) {
+  } else if (!strcmp(texto, "detectar color") || !strcmp(texto, "2")) {
     if (!calibrado) {
       Serial.println(F("Primero complete la calibracion."));
       return;
     }
 
     modo = 2;
-    hayResultado = false;
     botonYaAtendido = false;
+
     Serial.println(F("Deteccion activa. Presione el boton para leer."));
     pantalla("Listo para medir", "Presione boton");
-    return;
-  }
-
-  if (modo == 1 && !strcmp(texto, "listo")) {
+  } else if (modo == 1 && !strcmp(texto, "listo")) {
     tomarPatron();
-    return;
+  } else {
+    Serial.println(
+      F("Comando no valido. Use calibrar, detectar color, referencias o menu.")
+    );
   }
-
-  Serial.println(F("Comando no valido. Use calibrar, listo, detectar color, referencias o menu."));
 }
 
 void leerComandos() {
@@ -418,14 +420,14 @@ void leerComandos() {
       if (comandoLargo) {
         Serial.println(F("Comando demasiado largo. Escribalo de nuevo."));
       } else if (longitud > 0) {
-        comando[longitud] = 0;
+        comando[longitud] = '\0';
         procesarComando(comando);
       }
 
       longitud = 0;
       comandoLargo = false;
     } else if (caracter == 8 || caracter == 127) {
-      if (longitud) longitud--;
+      if (longitud > 0) longitud--;
     } else if (longitud < sizeof(comando) - 1) {
       comando[longitud++] = caracter;
     } else {
@@ -439,7 +441,7 @@ void setup() {
   Serial.begin(9600);
 
   pinMode(PIN_LDR, INPUT);
-  pinMode(PIN_BOTON, INPUT); // Pull-up externo de 10 kOhm y filtro RC.
+  pinMode(PIN_BOTON, INPUT); // Pull-up externo del circuito del botón
   analogReference(DEFAULT);
 
   led.begin();
@@ -447,7 +449,7 @@ void setup() {
   iluminarTodos(0, 0, 0);
 
   bandeja.attach(PIN_SERVO, SERVO_MIN_US, SERVO_MAX_US);
-  moverServo(ANGULO_SIN_MUESTRA);
+  moverServo(90);
 
   Wire.begin();
 
@@ -455,17 +457,15 @@ void setup() {
   Wire.setWireTimeout(25000, true);
 #endif
 
-  Wire.beginTransmission(DIRECCION_LCD);
-  lcdDisponible = (Wire.endTransmission() == 0);
-
-  if (lcdDisponible) {
-    lcd.begin();
-    lcd.backlight();
-  } else {
-    Serial.println(F("LCD sin respuesta: revise direccion y cables."));
-  }
+  // Inicialización para el módulo LCD RGB de DFRobot.
+  // Esta librería administra internamente la comunicación I2C;
+  // no se comprueba una dirección fija como con LiquidCrystal_I2C.
+  lcd.init();
+  lcd.setRGB(255, 0, 0);
+  lcdDisponible = true;
 
   EEPROM.get(0, calibracion);
+
   calibrado =
     calibracion.firma == FIRMA_CALIBRACION &&
     calibracion.version == VERSION_CALIBRACION &&
@@ -473,19 +473,12 @@ void setup() {
     calibracion.crc == calcularCRC(calibracion);
 
   mostrarMenu();
-  if (calibrado) {
-    Serial.println(F("Calibracion recuperada de EEPROM."));
-  } else {
-    Serial.println(F("Sin calibracion valida. Escriba calibrar para comenzar."));
-  }
 }
 
 void loop() {
   leerComandos();
 
-  // Cada pulsacion realiza una medicion solo en modo deteccion.
-  bool presionado = botonPresionado();
-  if (modo == 2 && presionado) {
+  if (modo == 2 && botonPresionado()) {
     detectarColor();
   }
 }
