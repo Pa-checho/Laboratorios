@@ -413,8 +413,8 @@ void atender_menu(void)
             serie_texto("Valor invalido. Escribir un entero de -10 a 44.\r\n");
         } else if (nuevo_punto + MARGEN_SUPERIOR > DHT11_MAXIMO) {
             /* Rechaza antes de modificar el punto medio o las salidas. */
-            serie_texto("Cambio rechazado: punto medio demasiado cercano ");
-            serie_texto("o superior al maximo del DHT11 (50 C).\r\n");
+            serie_texto("Esto es un calefactor, no una freidora. Maximo: 44 C.\r\n");
+            serie_texto("Cambio rechazado por seguridad del DHT11.\r\n");
             serie_texto("Se requiere un margen de 6 C. Maximo permitido: 44 C.\r\n");
             serie_texto("Se mantiene el punto medio en ");
             serie_numero(punto_medio);
