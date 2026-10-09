@@ -359,7 +359,6 @@ void mostrar_menu(void)
     serie_texto("\r\n--- MENU DE TEMPERATURA ---\r\n");
     serie_texto("Escribir punto medio (-10 a 44) y pulsar Enter.\r\n");
     serie_texto("Proteccion DHT11: se rechazan valores mayores de 44 C.\r\n");
-    serie_texto("Ejemplo: 25 seguido de Enter.\r\n");
     serie_texto("r: restaurar 22 C | m: ver menu y rangos\r\n");
     serie_texto("Retroceso: borrar digito | Escape: cancelar entrada\r\n");
     mostrar_rangos();
