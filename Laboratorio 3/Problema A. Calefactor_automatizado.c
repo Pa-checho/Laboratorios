@@ -357,7 +357,7 @@ void mostrar_rangos(void)
 void mostrar_menu(void)
 {
     serie_texto("\r\n--- MENU DE TEMPERATURA ---\r\n");
-    serie_texto("Escribir punto medio (-10 a 60) y pulsar Enter.\r\n");
+    serie_texto("Escribir punto medio (-10 a 44) y pulsar Enter.\r\n");
     serie_texto("Proteccion DHT11: se rechazan valores mayores de 44 C.\r\n");
     serie_texto("Ejemplo: 25 seguido de Enter.\r\n");
     serie_texto("r: restaurar 22 C | m: ver menu y rangos\r\n");
@@ -411,7 +411,7 @@ void atender_menu(void)
         if (inicio == 1) nuevo_punto = -nuevo_punto;
         if (entrada_invalida || nuevo_punto < PUNTO_MINIMO ||
             nuevo_punto > PUNTO_MAXIMO) {
-            serie_texto("Valor invalido. Escribir un entero de -10 a 60.\r\n");
+            serie_texto("Valor invalido. Escribir un entero de -10 a 44.\r\n");
         } else if (nuevo_punto + MARGEN_SUPERIOR > DHT11_MAXIMO) {
             /* Rechaza antes de modificar el punto medio o las salidas. */
             serie_texto("Cambio rechazado: punto medio demasiado cercano ");
@@ -496,4 +496,3 @@ int main(void)
         }
     }
 }
-
