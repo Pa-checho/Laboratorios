@@ -1,4 +1,4 @@
-/* Etapa 6: version completa, con ingreso numerico y validacion. */
+/* Calefactor automatizado con ajuste del punto medio por puerto serie. */
 /*
  * Control de temperatura - ATmega328P - Microchip Studio / AVR-GCC
  * Reloj supuesto: 16 MHz. Compilar con optimizacion -Os.
@@ -32,7 +32,7 @@
 
 /* El rango medio es punto_medio - 6 hasta punto_medio + 6.
  * Inicialmente: 22 - 6 = 16 C y 22 + 6 = 28 C.
- * Limites de ingreso -10..60 C; los umbrales se desplazan con el punto medio.
+ * Rango aceptado: -10..44 C; los umbrales se desplazan con el punto medio.
  */
 #define PUNTO_MINIMO -10
 #define PUNTO_MAXIMO 60
