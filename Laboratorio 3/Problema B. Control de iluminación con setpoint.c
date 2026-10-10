@@ -1,11 +1,12 @@
 /*
  * Problema B: control de iluminacion con persiana motorizada.
- * Bloque 1: adquisicion de sensores y diagnostico por UART.
+ * Bloque 2: setpoint por UART y persistencia en EEPROM.
  * ATmega328P, 16 MHz. Compilar como C con optimizacion -Os.
  * LDR en A0, potenciometro de posicion en A1.
  * L298: ENA=D9, IN1=D4, IN2=D5. Motor deshabilitado en esta etapa.
  * Monitor Serie: 9600 baudios, 8N1.
  * Lecturas cada 50 ms; diagnostico cada 100 ms.
+ * Enviar un setpoint de 0 a 1023 seguido de Enter.
  */
 #ifndef F_CPU
 #define F_CPU 16000000UL
@@ -13,6 +14,7 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/eeprom.h>
 #include <util/atomic.h>
 #include <stdint.h>
 
@@ -21,6 +23,16 @@
 #define MOTOR_IN1 PD4
 #define MOTOR_IN2 PD5
 #define MOTOR_PWM PB1
+#define SETPOINT_INICIAL 512u
+#define UART_BUFFER_TAM 32u
+#define UART_BUFFER_MASK (UART_BUFFER_TAM - 1u)
+
+uint16_t EEMEM eeprom_setpoint;
+static uint16_t setpoint = SETPOINT_INICIAL;
+static volatile uint8_t uart_buffer[UART_BUFFER_TAM];
+static volatile uint8_t uart_escritura;
+static volatile uint8_t uart_lectura;
+static volatile uint8_t uart_error;
 
 static volatile uint32_t reloj_ms;
 static uint16_t lectura_ldr;
@@ -30,6 +42,24 @@ static uint16_t posicion_persiana;
 ISR(TIMER0_COMPA_vect)
 {
     reloj_ms++;
+}
+
+ISR(USART_RX_vect)
+{
+    uint8_t estado = UCSR0A;
+    uint8_t dato = UDR0;
+    uint8_t siguiente = (uint8_t)((uart_escritura + 1u) & UART_BUFFER_MASK);
+
+    if ((estado & (_BV(FE0) | _BV(DOR0) | _BV(UPE0))) ||
+        siguiente == uart_lectura)
+    {
+        uart_error = 1;
+    }
+    else
+    {
+        uart_buffer[uart_escritura] = dato;
+        uart_escritura = siguiente;
+    }
 }
 
 static uint32_t tiempo_actual_ms(void)
@@ -134,7 +164,7 @@ static void uart_iniciar(void)
         |
         _BV(UCSZ00);
 
-    UCSR0B = _BV(TXEN0); /* Solo transmision en el bloque 1. */
+    UCSR0B = _BV(RXEN0) | _BV(TXEN0) | _BV(RXCIE0);
 }
 
 static void uart_enviar_caracter(char caracter)
@@ -186,9 +216,206 @@ static void uart_enviar_numero(uint16_t numero)
     }
 }
 
+static void setpoint_cargar_eeprom(void)
+{
+    uint16_t guardado;
+
+    guardado =
+        eeprom_read_word(
+            &eeprom_setpoint
+        );
+
+    if (guardado <= 1023u)
+    {
+        setpoint = guardado;
+    }
+    else
+    {
+        setpoint = SETPOINT_INICIAL;
+
+        eeprom_update_word(
+            &eeprom_setpoint,
+            setpoint
+        );
+    }
+}
+
+static void setpoint_guardar_eeprom(void)
+{
+    eeprom_update_word(
+        &eeprom_setpoint,
+        setpoint
+    );
+}
+
+static void uart_procesar_caracter(
+    char caracter
+)
+{
+    static char digitos[5];
+
+    static uint8_t cantidad;
+
+    static uint8_t invalido;
+
+    uint32_t nuevo_setpoint = 0; /* Evita desbordamiento con cinco digitos. */
+
+
+    if (
+        caracter == '\r'
+        ||
+        caracter == '\n'
+    )
+    {
+        if (
+            cantidad == 0
+            &&
+            !invalido
+        )
+        {
+            return;
+        }
+
+
+        if (
+            !invalido
+            &&
+            cantidad > 0
+        )
+        {
+            for (
+                uint8_t i = 0;
+                i < cantidad;
+                i++
+            )
+            {
+                nuevo_setpoint =
+                    (uint32_t)(
+                        nuevo_setpoint * 10UL
+                        +
+                        (uint8_t)(
+                            digitos[i] - '0'
+                        )
+                    );
+            }
+
+
+            if (nuevo_setpoint <= 1023u)
+            {
+                setpoint =
+                    nuevo_setpoint;
+
+
+                setpoint_guardar_eeprom();
+
+
+                uart_enviar_texto(
+                    "Setpoint actualizado y guardado: "
+                );
+
+
+                uart_enviar_numero(
+                    setpoint
+                );
+
+
+                uart_enviar_texto(
+                    "\r\n"
+                );
+            }
+            else
+            {
+                uart_enviar_texto(
+                    "Error: ingresar un entero de 0 a 1023.\r\n"
+                );
+            }
+        }
+        else
+        {
+            uart_enviar_texto(
+                "Error: ingresar un entero de 0 a 1023.\r\n"
+            );
+        }
+
+
+        cantidad = 0;
+
+        invalido = 0;
+
+        return;
+    }
+
+
+    if (
+        caracter == ' '
+        ||
+        caracter == '\t'
+    )
+    {
+        return;
+    }
+
+
+    if (
+        caracter >= '0'
+        &&
+        caracter <= '9'
+        &&
+        cantidad < sizeof(digitos)
+    )
+    {
+        digitos[cantidad++] =
+            caracter;
+    }
+    else
+    {
+        invalido = 1;
+    }
+}
+
+/* Extrae cada caracter y comprueba errores antes de procesar la entrada. */
+static void uart_atender_entrada(void)
+{
+    for (;;)
+    {
+        uint8_t error = 0;
+        uint8_t disponible = 0;
+        char caracter = 0;
+
+        ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+        {
+            if (uart_error)
+            {
+                uart_lectura = uart_escritura;
+                uart_error = 0;
+                error = 1;
+            }
+            else if (uart_lectura != uart_escritura)
+            {
+                caracter = (char)uart_buffer[uart_lectura];
+                uart_lectura = (uint8_t)((uart_lectura + 1u) & UART_BUFFER_MASK);
+                disponible = 1;
+            }
+        }
+
+        if (error)
+        {
+            /* Marca la linea incompleta como invalida hasta recibir Enter. */
+            uart_procesar_caracter('\0');
+            uart_enviar_texto("Error UART; presione Enter y reenvie el setpoint.\r\n");
+            return;
+        }
+        if (!disponible) return;
+        uart_procesar_caracter(caracter);
+    }
+}
+
 /* Permite comprobar ambos sensores antes de incorporar el control. */
 static void enviar_diagnostico(void)
 {
+    uart_enviar_texto("SP=");
+    uart_enviar_numero(setpoint);
+    uart_enviar_texto(",");
     uart_enviar_texto("LDR=");
     uart_enviar_numero(lectura_ldr);
     uart_enviar_texto(",POS=");
@@ -215,12 +442,17 @@ int main(void)
     adc_iniciar();
     uart_iniciar();
     temporizador_iniciar();
+    setpoint_cargar_eeprom();
     sei();
 
-    uart_enviar_texto("Lectura de LDR y posicion lista. Motor deshabilitado.\r\n");
+    uart_enviar_texto("Setpoint cargado desde EEPROM: ");
+    uart_enviar_numero(setpoint);
+    uart_enviar_texto("\r\nEnviar setpoint ADC de 0 a 1023 y Enter.\r\n");
+    uart_enviar_texto("Motor deshabilitado en esta etapa.\r\n");
 
     for (;;)
     {
+        uart_atender_entrada();
         uint32_t ahora = tiempo_actual_ms();
 
         if ((int32_t)(ahora - siguiente_lectura) >= 0)
