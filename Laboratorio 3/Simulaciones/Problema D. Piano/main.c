@@ -9,7 +9,6 @@
 #include <util/atomic.h>
 #include <util/delay.h>
 #include <stdint.h>
-#include "librerias_piano/twi.h"
 
 /*
   ARDUINO UNO - ATmega328P - 16 MHz
@@ -53,7 +52,7 @@
 #define SILENCIO 0u
 #define SOSTENER 255u
 
-#define C1_PASO_MS 125u
+#define PASO_MS 125u
 #define C1_PASOS 160u
 
 #define C2_PASOS 144u
@@ -252,10 +251,8 @@ static const uint8_t cancion_c3[C3_PASOS][2] PROGMEM = {
     {85,44},{255,255},{87,255},{255,255},{84,51},{85,255},{0,0},{0,0}
 };
 
-// Valores de comparacion para las notas MIDI 24 a 96.
-// Se guardan en Flash con PROGMEM para no ocupar la RAM con las tablas.
-// La frecuencia se obtiene con F_CPU / (2 * divisor * (OCR + 1)).
-static const uint16_t comparacion_timer1[73] PROGMEM = {
+// Tablas de frecuencias para notas MIDI 24 a 96.
+static const uint16_t ocr1_por_nota[73] PROGMEM = {
     30577,28861,27241,25712,24269,22906,21621,20408,19262,18181,17160,16197,
     15288,14430,13620,12855,12134,11453,10810,10203,9630,9090,8580,8098,
     7644,7214,6810,6427,6066,5726,5404,5101,4815,4544,4289,4049,
@@ -264,7 +261,7 @@ static const uint16_t comparacion_timer1[73] PROGMEM = {
     955,901,850,803,757,715,675,637,601,567,535,505,477
 };
 
-static const uint8_t comparacion_timer2[73] PROGMEM = {
+static const uint8_t ocr2_por_nota[73] PROGMEM = {
     238,224,212,200,189,178,168,158,149,141,133,126,
     118,112,105,99,94,88,83,79,74,70,66,252,
     238,224,212,200,189,178,168,158,149,141,133,252,
@@ -273,7 +270,7 @@ static const uint8_t comparacion_timer2[73] PROGMEM = {
     238,224,212,200,189,178,168,158,149,141,133,126,118
 };
 
-static const uint8_t divisor_timer2[73] PROGMEM = {
+static const uint8_t cs2_por_nota[73] PROGMEM = {
     7,7,7,7,7,7,7,7,7,7,7,7,
     7,7,7,7,7,7,7,7,7,7,7,6,
     6,6,6,6,6,6,6,6,6,6,6,5,
@@ -284,92 +281,128 @@ static const uint8_t divisor_timer2[73] PROGMEM = {
 
 // ================= LCD I2C =================
 
-#define DIRECCION_LCD 0x27u
+#define LCD_I2C_ADDR 0x27u
 
 #define LCD_RS 0x01u
 #define LCD_RW 0x02u
 #define LCD_EN 0x04u
-#define LCD_LUZ 0x08u
+#define LCD_BL 0x08u
 
-static void enviar_al_modulo_lcd(uint8_t dato)
+static void twi_init(void)
 {
-    // Como en clase: START, direccion, dato y STOP.
-    TWI_start();
-    TWI_write((uint8_t)(DIRECCION_LCD << 1)); // Bit R/W = 0: escritura.
-    TWI_write((uint8_t)(dato | LCD_LUZ));
-    TWI_stop();
+    // F_CPU = 16 MHz
+    // SCL = 100 kHz con prescaler = 1:
+    // TWBR = ((16 MHz / 100 kHz) - 16) / 2 = 72
+    TWSR = 0;
+    TWBR = 72;
+    TWCR = _BV(TWEN);
 }
 
-static void dar_pulso_lcd(uint8_t dato)
+static void twi_start(void)
 {
-    enviar_al_modulo_lcd((uint8_t)(dato | LCD_EN));
+    TWCR = _BV(TWINT) | _BV(TWSTA) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+
+    TWDR = (uint8_t)(LCD_I2C_ADDR << 1); // SLA + W
+    TWCR = _BV(TWINT) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+}
+
+static void twi_write(uint8_t dato)
+{
+    TWDR = dato;
+    TWCR = _BV(TWINT) | _BV(TWEN);
+
+    while (!(TWCR & _BV(TWINT))) {
+    }
+}
+
+static void twi_stop(void)
+{
+    TWCR = _BV(TWINT) | _BV(TWEN) | _BV(TWSTO);
+}
+
+static void lcd_expander(uint8_t dato)
+{
+    twi_start();
+    twi_write((uint8_t)(dato | LCD_BL));
+    twi_stop();
+}
+
+static void lcd_pulso_enable(uint8_t dato)
+{
+    lcd_expander((uint8_t)(dato | LCD_EN));
     _delay_us(1);
 
-    enviar_al_modulo_lcd((uint8_t)(dato & (uint8_t)~LCD_EN));
+    lcd_expander((uint8_t)(dato & (uint8_t)~LCD_EN));
     _delay_us(50);
 }
 
-static void enviar_cuatro_bits_lcd(uint8_t cuatro_bits, uint8_t es_texto)
+static void lcd_nibble_i2c(uint8_t nibble, uint8_t es_texto)
 {
-    uint8_t dato = (uint8_t)((cuatro_bits & 0x0Fu) << 4);
+    uint8_t dato = (uint8_t)((nibble & 0x0Fu) << 4);
 
     if (es_texto)
         dato |= LCD_RS;
 
     // RW siempre queda en 0: escritura.
-    dar_pulso_lcd(dato);
+    lcd_pulso_enable(dato);
 }
 
-static void enviar_byte_lcd(uint8_t dato, uint8_t es_texto)
+static void lcd_byte(uint8_t dato, uint8_t es_texto)
 {
-    enviar_cuatro_bits_lcd((uint8_t)(dato >> 4), es_texto);
-    enviar_cuatro_bits_lcd((uint8_t)(dato & 0x0Fu), es_texto);
+    lcd_nibble_i2c((uint8_t)(dato >> 4), es_texto);
+    lcd_nibble_i2c((uint8_t)(dato & 0x0Fu), es_texto);
 
     if (!es_texto && (dato == 0x01u || dato == 0x02u))
         _delay_ms(2);
 }
 
-static void iniciar_lcd(void)
+static void lcd_init(void)
 {
-    TWI_init();
+    twi_init();
 
     _delay_ms(50);
 
     // Secuencia de inicializacion HD44780 en modo 4 bits.
-    enviar_cuatro_bits_lcd(0x03, 0);
+    lcd_nibble_i2c(0x03, 0);
     _delay_ms(5);
 
-    enviar_cuatro_bits_lcd(0x03, 0);
+    lcd_nibble_i2c(0x03, 0);
     _delay_us(150);
 
-    enviar_cuatro_bits_lcd(0x03, 0);
+    lcd_nibble_i2c(0x03, 0);
     _delay_us(150);
 
-    enviar_cuatro_bits_lcd(0x02, 0);
+    lcd_nibble_i2c(0x02, 0);
     _delay_us(150);
 
-    enviar_byte_lcd(0x28, 0); // 4 bits, 2 lineas, 5x8
-    enviar_byte_lcd(0x08, 0); // display apagado
-    enviar_byte_lcd(0x01, 0); // limpiar
-    enviar_byte_lcd(0x06, 0); // incremento automatico
-    enviar_byte_lcd(0x0C, 0); // display encendido, cursor apagado
+    lcd_byte(0x28, 0); // 4 bits, 2 lineas, 5x8
+    lcd_byte(0x08, 0); // display apagado
+    lcd_byte(0x01, 0); // limpiar
+    lcd_byte(0x06, 0); // incremento automatico
+    lcd_byte(0x0C, 0); // display encendido, cursor apagado
 }
 
-static void escribir_linea_lcd(uint8_t fila, const char *texto)
+static void lcd_linea(uint8_t fila, const char *texto)
 {
-    enviar_byte_lcd(fila ? 0xC0 : 0x80, 0);
+    lcd_byte(fila ? 0xC0 : 0x80, 0);
 
     for (uint8_t i = 0; i < 16; ++i) {
-        char caracter = ' ';
+        char c = ' ';
 
         if (*texto)
-            caracter = *texto++;
+            c = *texto++;
 
-        enviar_byte_lcd((uint8_t)caracter, 1);
+        lcd_byte((uint8_t)c, 1);
     }
 }
 
-static void mostrar_nota_lcd(uint8_t fila, uint8_t nota)
+static void lcd_nota(uint8_t fila, uint8_t nota)
 {
     static const char * const nombres[8] = {
         "Do4", "Re4", "Mi4", "Fa4",
@@ -385,53 +418,50 @@ static void mostrar_nota_lcd(uint8_t fila, uint8_t nota)
     for (uint8_t i = 4; i < 16 && *nombre; ++i)
         linea[i] = *nombre++;
 
-    escribir_linea_lcd(fila, linea);
+    lcd_linea(fila, linea);
 }
 
-static void mostrar_teclas_lcd(uint8_t nota1, uint8_t nota2)
+static void lcd_mostrar_notas(uint8_t nota1, uint8_t nota2)
 {
     if (nota1 == SIN_NOTA && nota2 == SIN_NOTA) {
-        escribir_linea_lcd(0, "Piano listo");
-        escribir_linea_lcd(1, "Pulsa una tecla");
+        lcd_linea(0, "Piano listo");
+        lcd_linea(1, "Pulsa una tecla");
     } else {
-        mostrar_nota_lcd(0, nota1);
-        mostrar_nota_lcd(1, nota2);
+        lcd_nota(0, nota1);
+        lcd_nota(1, nota2);
     }
 }
 
 // ================= VARIABLES =================
 
-// La interrupcion del Timer0 suma 4 ms. volatile permite ver sus cambios.
 static volatile uint32_t reloj_ms;
 
-// Guardo los caracteres que llegan mientras el programa atiende otras tareas.
-// Es una cola circular de 64 posiciones; se pueden guardar hasta 63 caracteres.
-static volatile uint8_t datos_recibidos[64];
-static volatile uint8_t posicion_escritura;
-static volatile uint8_t posicion_lectura;
-static volatile uint8_t error_recepcion;
+static volatile uint8_t rx_buffer[64];
+static volatile uint8_t rx_escribir;
+static volatile uint8_t rx_leer;
+static volatile uint8_t rx_error;
 
-static uint8_t cancion_actual;
-static uint8_t esperando_numero_cancion;
+static uint8_t modo_cancion;
+static uint8_t esperando_numero;
 static uint16_t paso_actual;
 static uint16_t total_pasos;
-static uint16_t duracion_paso_ms;
+static uint16_t paso_ms;
 static uint8_t vueltas_restantes;
 
 static const uint8_t (*partitura)[2];
 
-static uint8_t buzzer_sonando[2];
-static uint32_t tiempo_proximo_paso;
-static uint32_t tiempo_fin_nota[2];
+static uint8_t voz_activa[2];
+static uint32_t siguiente_paso;
+static uint32_t fin_voz[2];
 
-static uint8_t nota_anterior_buzzer1 = SIN_NOTA;
-static uint8_t nota_anterior_buzzer2 = SIN_NOTA;
+static uint8_t anterior1 = SIN_NOTA;
+static uint8_t anterior2 = SIN_NOTA;
 
 static volatile uint8_t cambio_teclas = 1;
-static uint8_t lectura_pendiente;
-static uint8_t teclas_estables;
-static uint8_t teclas_en_rebote = 1;
-static uint32_t tiempo_ultimo_cambio;
+static uint8_t candidata;
+static uint8_t estable;
+static uint8_t en_rebote = 1;
+static uint32_t ultimo_cambio;
 
 // ================= RELOJ =================
 
@@ -469,22 +499,21 @@ ISR(USART_RX_vect)
 {
     uint8_t estado = UCSR0A;
     uint8_t dato = UDR0;
-    uint8_t siguiente = (uint8_t)((posicion_escritura + 1u) & 63u);
+    uint8_t siguiente = (uint8_t)((rx_escribir + 1u) & 63u);
 
     if ((estado & (_BV(FE0) | _BV(DOR0) | _BV(UPE0))) ||
-        siguiente == posicion_lectura) {
-        error_recepcion = 1;
+        siguiente == rx_leer) {
+        rx_error = 1;
     } else {
-        datos_recibidos[posicion_escritura] = dato;
-        posicion_escritura = siguiente;
+        rx_buffer[rx_escribir] = dato;
+        rx_escribir = siguiente;
     }
 }
 
-static uint32_t leer_reloj_ms(void)
+static uint32_t ahora_ms(void)
 {
     uint32_t valor;
 
-    // El micro es de 8 bits y el reloj ocupa 32: lo leo sin interrupciones.
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
         valor = reloj_ms;
     }
@@ -492,14 +521,14 @@ static uint32_t leer_reloj_ms(void)
     return valor;
 }
 
-static uint8_t se_cumplio_tiempo(uint32_t ahora, uint32_t plazo)
+static uint8_t vencido(uint32_t ahora, uint32_t plazo)
 {
     return (int32_t)(ahora - plazo) >= 0;
 }
 
 // ================= UART =================
 
-static void enviar_texto_uart(const char *texto)
+static void uart_texto(const char *texto)
 {
     while (*texto) {
         while (!(UCSR0A & _BV(UDRE0))) {
@@ -509,7 +538,7 @@ static void enviar_texto_uart(const char *texto)
     }
 }
 
-static void iniciar_uart(void)
+static void uart_init(void)
 {
     UCSR0A = 0;
     UBRR0H = 0;
@@ -521,40 +550,38 @@ static void iniciar_uart(void)
 
 // ================= BUZZERS =================
 
-// Buzzer 0: Timer1 y D9. Buzzer 1: Timer2 y D11.
-// Los timers cambian las salidas por hardware; no genero el sonido con delays.
-static void poner_nota(uint8_t buzzer, uint8_t nota_midi)
+static void tono(uint8_t voz, uint8_t midi)
 {
-    uint8_t nota_valida = nota_midi >= 24 && nota_midi <= 96;
-    uint8_t indice = nota_valida ? (uint8_t)(nota_midi - 24) : 0;
+    uint8_t valida = midi >= 24 && midi <= 96;
+    uint8_t indice = valida ? (uint8_t)(midi - 24) : 0;
 
-    if (buzzer == 0) {
+    if (voz == 0) {
         uint16_t valor =
-            nota_valida ? pgm_read_word(&comparacion_timer1[indice]) : 0;
+            valida ? pgm_read_word(&ocr1_por_nota[indice]) : 0;
 
         TCCR1B = 0;
         TCCR1A = 0;
         PORTB &= (uint8_t)~_BV(PB1);
         TCNT1 = 0;
 
-        if (nota_valida) {
+        if (valida) {
             OCR1A = valor;
             TCCR1A = _BV(COM1A0);
             TCCR1B = _BV(WGM12) | _BV(CS11);
         }
     } else {
         uint8_t valor =
-            nota_valida ? pgm_read_byte(&comparacion_timer2[indice]) : 0;
+            valida ? pgm_read_byte(&ocr2_por_nota[indice]) : 0;
 
         uint8_t prescaler =
-            nota_valida ? pgm_read_byte(&divisor_timer2[indice]) : 0;
+            valida ? pgm_read_byte(&cs2_por_nota[indice]) : 0;
 
         TCCR2B = 0;
         TCCR2A = 0;
         PORTB &= (uint8_t)~_BV(PB3);
         TCNT2 = 0;
 
-        if (nota_valida) {
+        if (valida) {
             OCR2A = valor;
             TCCR2A = _BV(WGM21) | _BV(COM2A0);
             TCCR2B = prescaler;
@@ -562,52 +589,52 @@ static void poner_nota(uint8_t buzzer, uint8_t nota_midi)
     }
 }
 
-static void apagar_buzzers(void)
+static void silencio(void)
 {
-    poner_nota(0, SILENCIO);
-    poner_nota(1, SILENCIO);
-    buzzer_sonando[0] = buzzer_sonando[1] = 0;
+    tono(0, SILENCIO);
+    tono(1, SILENCIO);
+    voz_activa[0] = voz_activa[1] = 0;
 }
 
 // ================= MODOS =================
 
 static void volver_al_piano(void)
 {
-    cancion_actual = 0;
-    apagar_buzzers();
+    modo_cancion = 0;
+    silencio();
 
-    nota_anterior_buzzer1 = nota_anterior_buzzer2 = SIN_NOTA;
-    lectura_pendiente = teclas_estables = 0;
-    teclas_en_rebote = 1;
-    tiempo_ultimo_cambio = leer_reloj_ms();
+    anterior1 = anterior2 = SIN_NOTA;
+    candidata = estable = 0;
+    en_rebote = 1;
+    ultimo_cambio = ahora_ms();
     cambio_teclas = 1;
 
     arrancar_reloj();
-    mostrar_teclas_lcd(SIN_NOTA, SIN_NOTA);
+    lcd_mostrar_notas(SIN_NOTA, SIN_NOTA);
 }
 
 static void iniciar_cancion(uint8_t numero)
 {
-    apagar_buzzers();
+    silencio();
     vueltas_restantes = 1;
 
     if (numero == 1) {
         partitura = cancion_c1;
         total_pasos = C1_PASOS;
-        duracion_paso_ms = C1_PASO_MS;
+        paso_ms = PASO_MS;
 
-        escribir_linea_lcd(0, "C1: Megalovania");
-        enviar_texto_uart(
+        lcd_linea(0, "C1: Megalovania");
+        uart_texto(
             "\r\nC1: Megalovania (20 s). P: detener.\r\n"
         );
 
     } else if (numero == 2) {
         partitura = cancion_c2;
         total_pasos = C2_PASOS;
-        duracion_paso_ms = C2_PASO_MS;
+        paso_ms = C2_PASO_MS;
 
-        escribir_linea_lcd(0, "C2: Dragonborn");
-        enviar_texto_uart(
+        lcd_linea(0, "C2: Dragonborn");
+        uart_texto(
             "\r\nC2: Dragonborn (18 s, 120 BPM). P: detener.\r\n"
         );
     }
@@ -615,11 +642,11 @@ static void iniciar_cancion(uint8_t numero)
     if (numero == 3) {
         partitura = cancion_c3;
         total_pasos = C3_PASOS;
-        duracion_paso_ms = C3_PASO_MS;
+        paso_ms = C3_PASO_MS;
         vueltas_restantes = 2;
 
-        escribir_linea_lcd(0, "C3: Bloody Tears");
-        enviar_texto_uart(
+        lcd_linea(0, "C3: Bloody Tears");
+        uart_texto(
             "\r\nC3: Bloody Tears (64 s, 120 BPM). P: detener.\r\n"
         );
     }
@@ -627,63 +654,63 @@ static void iniciar_cancion(uint8_t numero)
     if (numero == 4) {
         partitura = cancion_c4;
         total_pasos = C4_PASOS;
-        duracion_paso_ms = C4_PASO_MS;
+        paso_ms = C4_PASO_MS;
 
-        escribir_linea_lcd(0, "C4: Game Thrones");
-        enviar_texto_uart(
+        lcd_linea(0, "C4: Game Thrones");
+        uart_texto(
             "\r\nC4: Game of Thrones (97 s, 170 BPM). P: detener.\r\n"
         );
     }
 
-    escribir_linea_lcd(1, "P: volver piano");
+    lcd_linea(1, "P: volver piano");
     paso_actual = 0;
     arrancar_reloj();
-    tiempo_proximo_paso = leer_reloj_ms();
-    cancion_actual = numero;
+    siguiente_paso = ahora_ms();
+    modo_cancion = numero;
 }
 
 static void recibir_comandos(void)
 {
-    if (error_recepcion) {
+    if (rx_error) {
         ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-            posicion_lectura = posicion_escritura;
-            error_recepcion = 0;
+            rx_leer = rx_escribir;
+            rx_error = 0;
         }
 
-        esperando_numero_cancion = 0;
-        enviar_texto_uart("\r\nError UART. Reenviar comando.\r\n");
+        esperando_numero = 0;
+        uart_texto("\r\nError UART. Reenviar comando.\r\n");
     }
 
-    while (posicion_lectura != posicion_escritura) {
-        uint8_t caracter = datos_recibidos[posicion_lectura];
-        posicion_lectura = (uint8_t)((posicion_lectura + 1u) & 63u);
+    while (rx_leer != rx_escribir) {
+        uint8_t c = rx_buffer[rx_leer];
+        rx_leer = (uint8_t)((rx_leer + 1u) & 63u);
 
-        if (caracter >= 'a' && caracter <= 'z')
-            caracter = (uint8_t)(caracter - 'a' + 'A');
+        if (c >= 'a' && c <= 'z')
+            c = (uint8_t)(c - 'a' + 'A');
 
-        if (caracter == '\r' || caracter == '\n') {
-            esperando_numero_cancion = 0;
+        if (c == '\r' || c == '\n') {
+            esperando_numero = 0;
             continue;
         }
 
-        if (caracter == ' ' || caracter == '\t')
+        if (c == ' ' || c == '\t')
             continue;
 
-        if (caracter == 'P') {
-            esperando_numero_cancion = 0;
+        if (c == 'P') {
+            esperando_numero = 0;
             volver_al_piano();
-            enviar_texto_uart("\r\nModo piano.\r\n");
+            uart_texto("\r\nModo piano.\r\n");
 
-        } else if (caracter == 'C') {
-            esperando_numero_cancion = 1;
+        } else if (c == 'C') {
+            esperando_numero = 1;
 
-        } else if (esperando_numero_cancion && caracter >= '1' && caracter <= '4') {
-            esperando_numero_cancion = 0;
-            iniciar_cancion((uint8_t)(caracter - '0'));
+        } else if (esperando_numero && c >= '1' && c <= '4') {
+            esperando_numero = 0;
+            iniciar_cancion((uint8_t)(c - '0'));
 
         } else {
-            esperando_numero_cancion = 0;
-            enviar_texto_uart("\r\nComandos: C1, C2, C3, C4, P.\r\n");
+            esperando_numero = 0;
+            uart_texto("\r\nComandos: C1, C2, C3, C4, P.\r\n");
         }
     }
 }
@@ -692,74 +719,71 @@ static void recibir_comandos(void)
 
 static void actualizar_cancion(uint32_t ahora)
 {
-    while (cancion_actual && se_cumplio_tiempo(ahora, tiempo_proximo_paso)) {
+    while (modo_cancion && vencido(ahora, siguiente_paso)) {
         if (paso_actual >= total_pasos) {
             if (vueltas_restantes > 1) {
                 --vueltas_restantes;
                 paso_actual = 0;
             } else {
                 volver_al_piano();
-                enviar_texto_uart("\r\nFin de cancion. Modo piano.\r\n");
+                uart_texto("\r\nFin de cancion. Modo piano.\r\n");
                 return;
             }
         }
 
-        for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
+        for (uint8_t voz = 0; voz < 2; ++voz) {
             uint8_t nota =
-                pgm_read_byte(&partitura[paso_actual][buzzer]);
+                pgm_read_byte(&partitura[paso_actual][voz]);
 
             if (nota == SOSTENER)
                 continue;
 
-            poner_nota(buzzer, nota);
-            buzzer_sonando[buzzer] = nota != SILENCIO;
+            tono(voz, nota);
+            voz_activa[voz] = nota != SILENCIO;
 
-            if (buzzer_sonando[buzzer]) {
+            if (voz_activa[voz]) {
                 uint16_t duracion = 1;
 
                 while (
                     paso_actual + duracion < total_pasos &&
                     pgm_read_byte(
-                        &partitura[paso_actual + duracion][buzzer]
+                        &partitura[paso_actual + duracion][voz]
                     ) == SOSTENER
                 ) {
                     ++duracion;
                 }
 
-                // Dejo 12 ms de separacion al final, incluso si la nota se prolonga.
-                tiempo_fin_nota[buzzer] =
-                    tiempo_proximo_paso +
-                    (uint32_t)duracion * duracion_paso_ms - 12u;
+                fin_voz[voz] =
+                    siguiente_paso +
+                    (uint32_t)duracion * paso_ms - 12u;
             }
         }
 
         ++paso_actual;
-        tiempo_proximo_paso += duracion_paso_ms;
+        siguiente_paso += paso_ms;
     }
 
-    for (uint8_t buzzer = 0; buzzer < 2; ++buzzer) {
-        if (buzzer_sonando[buzzer] && se_cumplio_tiempo(ahora, tiempo_fin_nota[buzzer])) {
-            poner_nota(buzzer, SILENCIO);
-            buzzer_sonando[buzzer] = 0;
+    for (uint8_t voz = 0; voz < 2; ++voz) {
+        if (voz_activa[voz] && vencido(ahora, fin_voz[voz])) {
+            tono(voz, SILENCIO);
+            voz_activa[voz] = 0;
         }
     }
 }
 
-// ================= TECLADO =================
+// ================= TECLADO CORREGIDO =================
 
 static uint8_t leer_teclas(void)
 {
-    // Con pull-up, un boton presionado se lee como 0. Invierto para trabajar con 1.
-    uint8_t pulsadores_puerto_d = (uint8_t)~PIND;
-    uint8_t pulsadores_puerto_b = (uint8_t)~PINB;
+    uint8_t d = (uint8_t)~PIND;
+    uint8_t b = (uint8_t)~PINB;
 
-    // Bits 0 a 5: D2 a D7. Despues agrego Si y Do agudo en los bits 6 y 7.
-    uint8_t teclas = (uint8_t)((pulsadores_puerto_d >> 2) & 0x3Fu);
+    uint8_t teclas = (uint8_t)((d >> 2) & 0x3Fu);
 
-    if (pulsadores_puerto_b & _BV(PB0))
+    if (b & _BV(PB0))
         teclas |= _BV(6);
 
-    if (pulsadores_puerto_b & _BV(PB2))
+    if (b & _BV(PB2))
         teclas |= _BV(7);
 
     return teclas;
@@ -767,7 +791,7 @@ static uint8_t leer_teclas(void)
 
 static void actualizar_teclado(uint32_t ahora)
 {
-    if (cancion_actual)
+    if (modo_cancion)
         return;
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
@@ -777,27 +801,25 @@ static void actualizar_teclado(uint32_t ahora)
     // Lectura continua: no depende de PCINT.
     uint8_t lectura = leer_teclas();
 
-    // Acepto una lectura cuando lleva al menos 20 ms sin cambiar.
-    if (lectura != lectura_pendiente) {
-        lectura_pendiente = lectura;
-        tiempo_ultimo_cambio = ahora;
-        teclas_en_rebote = 1;
+    if (lectura != candidata) {
+        candidata = lectura;
+        ultimo_cambio = ahora;
+        en_rebote = 1;
 
-    } else if ((uint32_t)(ahora - tiempo_ultimo_cambio) >= 20) {
-        teclas_estables = lectura_pendiente;
-        teclas_en_rebote = 0;
+    } else if ((uint32_t)(ahora - ultimo_cambio) >= 20) {
+        estable = candidata;
+        en_rebote = 0;
     }
 
-    uint8_t nota_buzzer1 = SIN_NOTA;
-    uint8_t nota_buzzer2 = SIN_NOTA;
+    uint8_t n1 = SIN_NOTA;
+    uint8_t n2 = SIN_NOTA;
 
-    // Si hay mas de dos teclas, tomo las dos primeras desde Do hacia Do agudo.
     for (uint8_t i = 0; i < 8; ++i) {
-        if (teclas_estables & (uint8_t)_BV(i)) {
-            if (nota_buzzer1 == SIN_NOTA) {
-                nota_buzzer1 = i;
+        if (estable & (uint8_t)_BV(i)) {
+            if (n1 == SIN_NOTA) {
+                n1 = i;
             } else {
-                nota_buzzer2 = i;
+                n2 = i;
                 break;
             }
         }
@@ -807,24 +829,23 @@ static void actualizar_teclado(uint32_t ahora)
         60, 62, 64, 65, 67, 69, 71, 72
     };
 
-    uint8_t cambio = nota_buzzer1 != nota_anterior_buzzer1 || nota_buzzer2 != nota_anterior_buzzer2;
+    uint8_t cambio = n1 != anterior1 || n2 != anterior2;
 
-    // Solo cambio el timer si cambia la nota, asi no reinicio un tono sostenido.
-    if (nota_buzzer1 != nota_anterior_buzzer1) {
-        poner_nota(0, nota_buzzer1 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer1]);
-        nota_anterior_buzzer1 = nota_buzzer1;
+    if (n1 != anterior1) {
+        tono(0, n1 == SIN_NOTA ? SILENCIO : midi_teclas[n1]);
+        anterior1 = n1;
     }
 
-    if (nota_buzzer2 != nota_anterior_buzzer2) {
-        poner_nota(1, nota_buzzer2 == SIN_NOTA ? SILENCIO : midi_teclas[nota_buzzer2]);
-        nota_anterior_buzzer2 = nota_buzzer2;
+    if (n2 != anterior2) {
+        tono(1, n2 == SIN_NOTA ? SILENCIO : midi_teclas[n2]);
+        anterior2 = n2;
     }
 
     if (cambio)
-        mostrar_teclas_lcd(nota_buzzer1, nota_buzzer2);
+        lcd_mostrar_notas(n1, n2);
 }
 
-static void mantener_reloj_activo(void)
+static void parar_reloj_si_estable(void)
 {
     // Mantener siempre el reloj de 4 ms en funcionamiento.
     arrancar_reloj();
@@ -847,9 +868,9 @@ int main(void)
     PORTB &= (uint8_t)~(_BV(PB1) | _BV(PB3));
     DDRB |= _BV(PB1) | _BV(PB3);
 
-    apagar_buzzers();
-    iniciar_lcd();
-    iniciar_uart();
+    silencio();
+    lcd_init();
+    uart_init();
 
     // Timer0: interrupcion cada 4 ms.
     TCCR0A = _BV(WGM01);
@@ -857,7 +878,7 @@ int main(void)
     TCCR0B = 0;
     TIMSK0 = _BV(OCIE0A);
 
-    // Los cambios en los pulsadores despiertan al micro; tambien los leo cada 4 ms.
+    // Interrupciones de los pulsadores.
     PCMSK0 = _BV(PCINT0) | _BV(PCINT2);
     PCMSK2 = 0xFC;
     PCIFR = _BV(PCIF0) | _BV(PCIF2);
@@ -867,7 +888,7 @@ int main(void)
     set_sleep_mode(SLEEP_MODE_IDLE);
     sei();
 
-    enviar_texto_uart(
+    uart_texto(
         "\r\nPiano listo. 9600 baudios.\r\n"
         "C1: Megalovania; C2: Dragonborn; "
         "C3: Bloody Tears; C4: Game of Thrones; P: piano.\r\n"
@@ -876,19 +897,20 @@ int main(void)
     for (;;) {
         recibir_comandos();
 
-        uint32_t ahora = leer_reloj_ms();
+        uint32_t ahora = ahora_ms();
 
-        if (cancion_actual)
+        if (modo_cancion)
             actualizar_cancion(ahora);
 
-        actualizar_teclado(leer_reloj_ms());
+        actualizar_teclado(ahora_ms());
 
         cli();
 
-        // El reloj sigue activo para revisar los botones cada 4 ms.
-        mantener_reloj_activo();
+        // Esta es una llamada a la funcion.
+        // La funcion esta definida fuera de main().
+        parar_reloj_si_estable();
 
-        if (posicion_lectura != posicion_escritura || error_recepcion) {
+        if (rx_leer != rx_escribir || rx_error) {
             sei();
         } else {
             sleep_enable();
