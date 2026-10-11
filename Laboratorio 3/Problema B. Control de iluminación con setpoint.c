@@ -7,7 +7,7 @@
  * Monitor Serie: 9600 baudios, 8N1.
  * Lecturas cada 50 ms; diagnostico cada 100 ms.
  * Enviar un setpoint de 0 a 1023 seguido de Enter.
- * Se detiene al alcanzar la banda de ambos sensores o un tope de recorrido.
+ * Se detiene al alcanzar la banda de iluminacion o un tope de recorrido.
  */
 #ifndef F_CPU
 #define F_CPU 16000000UL
@@ -28,6 +28,8 @@
 #define MOTOR_ABRE_IN1 1u
 #define POT_ADC_SUBE_AL_ABRIR 1u
 #define BANDA_MUERTA 18
+#define BANDA_REARRANQUE 25
+#define LDR_ADC_SUBE_CON_LUZ 1u
 #define PWM_MINIMO 110u
 #define PWM_MAXIMO 170u
 #define POSICION_MINIMA 25u
@@ -523,6 +525,18 @@ static void motor_mover(
         :
         !MOTOR_ABRE_IN1;
 
+    static uint8_t ultimo_sentido;
+    static uint8_t sentido_conocido;
+    static uint32_t cambio_ms;
+    uint32_t ahora = tiempo_actual_ms();
+    if (!sentido_conocido || ultimo_sentido != aumentar_luz) {
+        motor_parar();
+        ultimo_sentido = aumentar_luz;
+        sentido_conocido = 1;
+        cambio_ms = ahora;
+        return;
+    }
+    if ((uint32_t)(ahora - cambio_ms) < 50u) { motor_parar(); return; }
     if (in1_alto)
     {
         PORTD |=
@@ -554,210 +568,21 @@ static void motor_mover(
 
 static void controlar_luz(void)
 {
-    /*
-     * Ahora tenemos DOS errores.
-     *
-     * Error de iluminacion:
-     * setpoint - LDR
-     *
-     * Error de posicion:
-     * setpoint - potenciometro
+    /* SP y LDR son iluminacion ADC. POS solo indica posicion y topes.
+     * No hay una calibracion que permita restar SP - POS.
      */
-
-    int16_t error_ldr =
-        (int16_t)setpoint
-        -
-        (int16_t)lectura_ldr;
-
-
-    int16_t error_posicion =
-        (int16_t)setpoint
-        -
-        (int16_t)posicion_persiana;
-
-
-    /*
-     * Comprobamos por separado si LDR y POT
-     * estan dentro de la banda muerta.
-     */
-
-    uint8_t ldr_en_setpoint =
-        (
-            error_ldr >= -BANDA_MUERTA
-            &&
-            error_ldr <= BANDA_MUERTA
-        );
-
-
-    uint8_t posicion_en_setpoint =
-        (
-            error_posicion >= -BANDA_MUERTA
-            &&
-            error_posicion <= BANDA_MUERTA
-        );
-
-
-    /*
-     * IMPORTANTE:
-     *
-     * El motor solamente se detiene si
-     * LOS DOS llegaron al setpoint.
-     *
-     * LDR OK + POT OK = PARAR
-     */
-
-    if (
-        ldr_en_setpoint
-        &&
-        posicion_en_setpoint
-    )
-    {
-        motor_parar();
-
-        return;
-    }
-
-
-    /*
-     * Elegimos que error utilizar para controlar
-     * el movimiento del motor.
-     *
-     * Si uno de los sensores ya llego,
-     * usamos el otro para seguir corrigiendo.
-     */
-
-    int16_t error_control;
-
-
-    if (ldr_en_setpoint && !posicion_en_setpoint)
-    {
-        /*
-         * LDR ya llego.
-         * Falta acomodar posicion.
-         */
-        error_control =
-            error_posicion;
-    }
-
-    else if (!ldr_en_setpoint && posicion_en_setpoint)
-    {
-        /*
-         * Posicion ya llego.
-         * Falta acomodar iluminacion.
-         */
-        error_control =
-            error_ldr;
-    }
-
-    else
-    {
-        /*
-         * Ninguno llego.
-         *
-         * Se utiliza un promedio de ambos errores
-         * para decidir hacia donde mover la persiana.
-         */
-
-        error_control =
-            (int16_t)(
-                (
-                    (int32_t)error_ldr
-                    +
-                    (int32_t)error_posicion
-                )
-                /
-                2
-            );
-    }
-
-
-    /*
-     * Si los errores estan en sentidos contrarios
-     * y el promedio queda exactamente en cero,
-     * se prioriza el error mas grande.
-     */
-
-    if (error_control == 0)
-    {
-        int16_t absoluto_ldr =
-            error_ldr >= 0
-            ?
-            error_ldr
-            :
-            -error_ldr;
-
-
-        int16_t absoluto_posicion =
-            error_posicion >= 0
-            ?
-            error_posicion
-            :
-            -error_posicion;
-
-
-        if (absoluto_ldr >= absoluto_posicion)
-        {
-            error_control =
-                error_ldr;
-        }
-        else
-        {
-            error_control =
-                error_posicion;
-        }
-    }
-
-
-    /*
-     * Calculamos magnitud del error.
-     */
-
-    uint16_t magnitud =
-        (uint16_t)(
-            error_control > 0
-            ?
-            error_control
-            :
-            -error_control
-        );
-
-
-    /*
-     * Calculamos PWM proporcional al error.
-     */
-
-    uint16_t pwm =
-        PWM_MINIMO
-        +
-        (uint16_t)(
-            (
-                (uint32_t)magnitud
-                *
-                (PWM_MAXIMO - PWM_MINIMO)
-            )
-            /
-            1023u
-        );
-
-
-    if (pwm > PWM_MAXIMO)
-    {
-        pwm = PWM_MAXIMO;
-    }
-
-
-    /*
-     * Error positivo:
-     * falta aumentar -> ABRIR.
-     *
-     * Error negativo:
-     * sobra -> CERRAR.
-     */
-
-    motor_mover(
-        error_control > 0,
-        (uint8_t)pwm
-    );
+    int16_t error = (int16_t)setpoint - (int16_t)lectura_ldr;
+    uint16_t magnitud = (uint16_t)(error >= 0 ? error : -error);
+    static uint8_t en_banda;
+    /* Parar con |e|<=18; volver a mover solo cuando |e|>25. */
+    if (magnitud <= BANDA_MUERTA) en_banda = 1;
+    else if (magnitud > BANDA_REARRANQUE) en_banda = 0;
+    if (en_banda) { motor_parar(); return; }
+    uint16_t pwm = PWM_MINIMO + (uint16_t)(
+        (uint32_t)magnitud * (PWM_MAXIMO - PWM_MINIMO) / 1023u);
+    if (pwm > PWM_MAXIMO) pwm = PWM_MAXIMO;
+    uint8_t aumentar_luz = LDR_ADC_SUBE_CON_LUZ ? error > 0 : error < 0;
+    motor_mover(aumentar_luz, (uint8_t)pwm);
 }
 
 /* Diagnostico del control de iluminacion. */

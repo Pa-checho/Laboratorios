@@ -6,6 +6,7 @@
  *
  * DHT11 DATA: PD2, con resistencia de 4,7 kOhm a VCC.
  * Calefactor: LED en PB0. Ventilador: LED 1/2/3 en PD4/PD5/PD6.
+ * PWM ventilador: PD3/OC2B (D3), requiere etapa de potencia externa.
  * Cada LED lleva una resistencia de 330 ohm y su catodo a GND.
  * LCD 16x2 HD44780: RS=PB1, E=PB2, D4..D7=PC0..PC3, RW=GND.
  * Serie TX: PD1 hacia RX del terminal. RX: PD0 desde TX del terminal.
@@ -21,6 +22,7 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdint.h>
+#include <util/atomic.h>
 
 #define DHT_PIN PD2
 #define CALEFACTOR_PIN PB0
@@ -30,17 +32,22 @@
 #define LCD_RS PB1
 #define LCD_E PB2
 
-/* El rango medio es punto_medio - 6 hasta punto_medio + 6.
- * Inicialmente: 22 - 6 = 16 C y 22 + 6 = 28 C.
- * Rango aceptado: -10..44 C; los umbrales se desplazan con el punto medio.
+/* PM=22: calefactor 0..15, reposo 16..25, bajo 26..35,
+ * medio 36..45, alto desde 46. Se cubre 46, omitido en la consigna.
+ * Histeresis de 1 C: al subir se cruza umbral+1;
+ * al bajar se cruza estrictamente por debajo de umbral-1.
+ * PM 8..25 mantiene los cinco estados alcanzables entre 0 y 50 C.
  */
-#define PUNTO_MINIMO -10
-#define PUNTO_MAXIMO 60
-/* El rango de reposo termina 6 C por encima del punto medio.
- * No permitir que ese limite supere el maximo medible del DHT11.
- */
+#define PUNTO_MINIMO 8
+#define PUNTO_MAXIMO 25
 #define DHT11_MAXIMO 50
-#define MARGEN_SUPERIOR 6
+#define HISTERESIS 1
+#define VENTILADOR_PWM PD3 /* D3 = OC2B, hacia etapa de potencia. */
+enum { CALOR, REPOSO, BAJO, MEDIO, ALTO, SIN_LECTURA };
+static uint8_t estado_control = SIN_LECTURA;
+static uint8_t nivel_ventilador;
+static uint8_t pwm_ventilador;
+static volatile uint32_t reloj_segundos;
 int16_t punto_medio = 22;
 int16_t temperatura = -2; /* -2: sin primera lectura. -1: error. */
 
@@ -51,6 +58,7 @@ volatile uint8_t medir = 0;
 ISR(TIMER1_COMPA_vect)
 {
     static uint8_t segundos = 0;
+    reloj_segundos++;
     segundos++;
     if (segundos == 5) {
         segundos = 0;
@@ -189,7 +197,7 @@ void lcd_actualizar(void)
     lcd_texto("                ");
     lcd_comando(0x80);
     if (temperatura == -2) lcd_texto("T:--");
-    else if (temperatura < 0) lcd_texto("T:ERR");
+    else if (temperatura < 0 || temperatura > DHT11_MAXIMO) lcd_texto("T:ERR");
     else {
         lcd_texto("T:");
         lcd_numero(temperatura);
@@ -205,7 +213,7 @@ void lcd_actualizar(void)
     lcd_texto("Medio:");
     lcd_numero(punto_medio - 6);
     lcd_texto("-");
-    lcd_numero(punto_medio + 6);
+    lcd_numero(punto_medio + 3);
     lcd_texto("C");
 }
 
@@ -229,11 +237,60 @@ void leds_iniciar(void)
 
 void ventilador(uint8_t nivel)
 {
-    /* Nivel 0: ninguno; 1: un LED; 2: dos; 3: los tres. */
+    /* Los LED conservan la indicacion original; D3 entrega el PWM real.
+     * Falta ensayar un ventilador con transistor/MOSFET y alimentacion.
+     */
+    nivel_ventilador = nivel;
+    pwm_ventilador = nivel * 85u; /* 0, 85, 170, 255. */
     PORTD &= ~((1 << LED_1) | (1 << LED_2) | (1 << LED_3));
     if (nivel >= 1) PORTD |= (1 << LED_1);
     if (nivel >= 2) PORTD |= (1 << LED_2);
     if (nivel >= 3) PORTD |= (1 << LED_3);
+    OCR2B = pwm_ventilador;
+    if (nivel) TCCR2A |= (1 << COM2B1);
+    else {
+        TCCR2A &= ~(1 << COM2B1);
+        PORTD &= ~(1 << VENTILADOR_PWM); /* Apagado continuo, sin pulsito. */
+    }
+}
+
+void ventilador_pwm_iniciar(void)
+{
+    PORTD &= ~(1 << VENTILADOR_PWM);
+    DDRD |= (1 << VENTILADOR_PWM);
+    TCCR2A = (1 << WGM21) | (1 << WGM20); /* Fast PWM de 8 bits. */
+    TCCR2B = (1 << CS22); /* Divisor 64: 976,56 Hz. */
+    OCR2B = 0;
+}
+
+int16_t umbral(uint8_t frontera)
+{
+    const int8_t desplazamiento[4] = {-6, 4, 14, 24};
+    return punto_medio + desplazamiento[frontera];
+}
+
+void enviar_medicion(void)
+{
+    uint32_t segundos;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { segundos = reloj_segundos; }
+    /* A1: cada linea incluye todos los datos necesarios para graficar.
+     * MS es tiempo del micro; OK=0 conserva el fallo sin inventar T.
+     */
+    serie_texto("A1,MS=");
+    char digitos[10];
+    uint8_t cantidad = 0;
+    uint32_t ms = segundos * 1000UL;
+    do { digitos[cantidad++] = '0' + ms % 10; ms /= 10; } while (ms);
+    while (cantidad) { char letra[2] = {digitos[--cantidad], 0}; serie_texto(letra); }
+    serie_texto(",T="); serie_numero(temperatura);
+    serie_texto(",PM="); serie_numero(punto_medio);
+    serie_texto(",LI="); serie_numero(punto_medio - 6);
+    serie_texto(",LS="); serie_numero(punto_medio + 3);
+    serie_texto(",CAL="); serie_numero(estado_control == CALOR);
+    serie_texto(",VENT="); serie_numero(nivel_ventilador);
+    serie_texto(",PWM="); serie_numero(pwm_ventilador);
+    serie_texto(",OK="); serie_numero(temperatura >= 0 && temperatura <= DHT11_MAXIMO);
+    serie_texto("\r\n");
 }
 
 /* Espera un nivel del DHT11. Devuelve 0 si el sensor no responde.
@@ -295,70 +352,52 @@ int16_t dht11_leer(void)
 
 void controlar_temperatura(void)
 {
-    /* Siempre apaga primero el calefactor antes de decidir. */
     PORTB &= ~(1 << CALEFACTOR_PIN);
-
-    if (temperatura < 0) {
+    if (temperatura < 0 || temperatura > DHT11_MAXIMO) {
+        estado_control = SIN_LECTURA;
         ventilador(0);
-        if (temperatura == -2) serie_texto("Esperando primera lectura.\r\n");
-        else serie_texto("ERROR DHT11 | Todas las salidas apagadas.\r\n");
+        enviar_medicion();
         return;
     }
-
-    serie_texto("Temperatura: ");
-    serie_numero(temperatura);
-    serie_texto(" C | ");
-
-    if (temperatura < punto_medio - 6) {
-        ventilador(0);
-        PORTB |= (1 << CALEFACTOR_PIN);
-        serie_texto("Calefactor encendido | Ventilador apagado\r\n");
-    } else if (temperatura <= punto_medio + 6) {
-        ventilador(0);
-        serie_texto("Calefactor apagado | Ventilador apagado\r\n");
-    } else if (temperatura <= punto_medio + 17) {
-        ventilador(1);
-        serie_texto("Calefactor apagado | Ventilador BAJO: 1 LED\r\n");
-    } else if (temperatura <= punto_medio + 28) {
-        ventilador(2);
-        serie_texto("Calefactor apagado | Ventilador MEDIO: 2 LED\r\n");
+    if (estado_control == SIN_LECTURA) {
+        /* Primera lectura o cambio de PM: aplicar intervalos nominales. */
+        estado_control = CALOR;
+        while (estado_control < ALTO && temperatura >= umbral(estado_control))
+            estado_control++;
     } else {
-        /* Con punto medio 22, el nivel alto empieza en 51 C. */
-        ventilador(3);
-        serie_texto("Calefactor apagado | Ventilador ALTO: 3 LED\r\n");
+        /* Conservar estado dentro de la banda de histeresis.
+         * Los bucles permiten saltos grandes sin pasar 5 s por cada nivel.
+         */
+        while (estado_control < ALTO &&
+               temperatura >= umbral(estado_control) + HISTERESIS)
+            estado_control++;
+        while (estado_control > CALOR &&
+               temperatura < umbral(estado_control - 1) - HISTERESIS)
+            estado_control--;
     }
+    if (estado_control == CALOR) PORTB |= (1 << CALEFACTOR_PIN);
+    ventilador(estado_control >= BAJO ? estado_control - 1 : 0);
+    enviar_medicion();
 }
 
 /* ---------------- MENU POR EL PUERTO SERIE ---------------- */
 
 void mostrar_rangos(void)
 {
-    serie_texto("\r\nPunto medio: ");
-    serie_numero(punto_medio);
-    serie_texto(" C\r\nCalefactor: T < ");
-    serie_numero(punto_medio - 6);
-    serie_texto(" C\r\nRango medio: ");
-    serie_numero(punto_medio - 6);
-    serie_texto(" a ");
-    serie_numero(punto_medio + 6);
-    serie_texto(" C\r\nBajo (1 LED): ");
-    serie_numero(punto_medio + 7);
-    serie_texto(" a ");
-    serie_numero(punto_medio + 17);
-    serie_texto(" C\r\nMedio (2 LED): ");
-    serie_numero(punto_medio + 18);
-    serie_texto(" a ");
-    serie_numero(punto_medio + 28);
-    serie_texto(" C\r\nAlto (3 LED): desde ");
-    serie_numero(punto_medio + 29);
-    serie_texto(" C\r\n");
+    serie_texto("\r\nPunto medio: "); serie_numero(punto_medio);
+    serie_texto(" C\r\nRango ideal nominal: "); serie_numero(punto_medio - 6);
+    serie_texto(" a "); serie_numero(punto_medio + 3);
+    serie_texto(" C\r\nVentilador bajo desde "); serie_numero(punto_medio + 4);
+    serie_texto(" C; medio desde "); serie_numero(punto_medio + 14);
+    serie_texto(" C; alto desde "); serie_numero(punto_medio + 24);
+    serie_texto(" C.\r\nHisteresis: 1 C a cada lado del umbral.\r\n");
 }
 
 void mostrar_menu(void)
 {
     serie_texto("\r\n--- MENU DE TEMPERATURA ---\r\n");
-    serie_texto("Escribir punto medio (-10 a 44) y pulsar Enter.\r\n");
-    serie_texto("Proteccion DHT11: se rechazan valores mayores de 44 C.\r\n");
+    serie_texto("Escribir punto medio (8 a 25) y pulsar Enter.\r\n");
+    serie_texto("Proteccion DHT11: PM 8..25 mantiene todos los estados medibles.\r\n");
     serie_texto("r: restaurar 22 C | m: ver menu y rangos\r\n");
     serie_texto("Retroceso: borrar digito | Escape: cancelar entrada\r\n");
     mostrar_rangos();
@@ -410,15 +449,7 @@ void atender_menu(void)
         if (inicio == 1) nuevo_punto = -nuevo_punto;
         if (entrada_invalida || nuevo_punto < PUNTO_MINIMO ||
             nuevo_punto > PUNTO_MAXIMO) {
-            serie_texto("Valor invalido. Escribir un entero de -10 a 44.\r\n");
-        } else if (nuevo_punto + MARGEN_SUPERIOR > DHT11_MAXIMO) {
-            /* Rechaza antes de modificar el punto medio o las salidas. */
-            serie_texto("Esto es un calefactor, no una freidora. Maximo: 44 C.\r\n");
-            serie_texto("Cambio rechazado por seguridad del DHT11.\r\n");
-            serie_texto("Se requiere un margen de 6 C. Maximo permitido: 44 C.\r\n");
-            serie_texto("Se mantiene el punto medio en ");
-            serie_numero(punto_medio);
-            serie_texto(" C.\r\n");
+            serie_texto("Valor invalido. Escribir un entero de 8 a 25.\r\n");
         } else {
             punto_medio = nuevo_punto;
             cambio = 1;
@@ -456,6 +487,7 @@ void atender_menu(void)
     }
 
     if (cambio) {
+        estado_control = SIN_LECTURA;
         serie_texto("Punto medio actualizado: ");
         serie_numero(punto_medio);
         serie_texto(" C\r\n");
@@ -475,6 +507,7 @@ int main(void)
 
     serie_iniciar();
     leds_iniciar();
+    ventilador_pwm_iniciar();
     lcd_iniciar();
     lcd_actualizar();
     mostrar_menu();

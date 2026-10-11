@@ -1,17 +1,3 @@
-/*
- * Clasificador de colores para Microchip Studio / AVR-GCC.
- * Destino asumido: ATmega328P a 16 MHz.
- *
- * Pines:
- *   LDR       = A0 / PC0
- *   NeoPixel  = D6 / PD6
- *   Servo     = D9 / PB1 / OC1A
- *   Boton     = D2 / PD2 (pull-up externo)
- *   LCD RGB   = bus TWI/I2C
- *
- * LCD asumido: DFRobot RGB LCD 16x2, direcciones 0x3E y 0x62.
- */
-
 #define F_CPU 16000000UL
 
 #include <avr/io.h>
@@ -25,6 +11,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <util/atomic.h>
 
 #define N_PIXELES 64
 #define PIN_WS PD6
@@ -83,6 +70,25 @@ static uint16_t lectura[3];
 static char comando[64];
 static char linea_lcd[17];
 static uint8_t longitud;
+static volatile uint32_t reloj_ms;
+static uint32_t siguiente_pagina;
+static uint8_t pagina_resultado;
+static bool resultado_disponible;
+
+ISR(TIMER0_COMPA_vect) { reloj_ms++; }
+
+static uint32_t tiempo_ms(void) {
+    uint32_t ahora;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { ahora = reloj_ms; }
+    return ahora;
+}
+
+static void reloj_init(void) {
+    TCCR0A = _BV(WGM01);
+    TCCR0B = _BV(CS01) | _BV(CS00);
+    OCR0A = 249;
+    TIMSK0 = _BV(OCIE0A);
+}
 
 /* UART0 a 9600 baudios, formato 8N1. */
 static void uart_init(void) {
@@ -288,7 +294,7 @@ static void ws_send_byte(uint8_t valor, uint8_t nivel_alto, uint8_t nivel_bajo) 
     uint8_t bits = 8;
 
     /*
-     * Cada bit dura 20 ciclos (1,25 us). El cero mantiene la señal alta
+     * Cada bit dura 20 ciclos (1,25 us). El cero mantiene la seÃ±al alta
      * 6 ciclos; el uno, 12 ciclos. Las interrupciones deben estar desactivadas.
      */
     asm volatile (
@@ -488,6 +494,7 @@ static uint8_t clasificar(const uint16_t valores[3], uint8_t *cercano) {
 
 static void mostrar_menu(void) {
     modo = 0;
+    resultado_disponible = false;
     ws_all(0, 0, 0);
     uart_line("");
     uart_line("=== CLASIFICADOR DE COLORES ===");
@@ -569,8 +576,30 @@ static void imprimir_referencias(void) {
 }
 
 static void mostrar_resultado(void) {
-    snprintf(linea_lcd, sizeof(linea_lcd), "Angulo: %d", angulo_actual);
-    pantalla(nombre(resultado), linea_lcd);
+    char segunda[17];
+    if (pagina_resultado == 0) {
+        snprintf(segunda, sizeof(segunda), "Angulo: %d", angulo_actual);
+        pantalla(nombre(resultado), segunda);
+    } else {
+        uint8_t canal = pagina_resultado - 1;
+        int32_t diferencia = (int32_t)lectura[canal] -
+            (int32_t)calibracion.referencia[mas_cercano][canal];
+        snprintf(linea_lcd, sizeof(linea_lcd), "%c L:%u P:%u", "RGB"[canal],
+            lectura[canal], calibracion.referencia[mas_cercano][canal]);
+        snprintf(segunda, sizeof(segunda), "D:%ld %s", (long)diferencia,
+            nombre(mas_cercano));
+        pantalla(linea_lcd, segunda);
+    }
+}
+
+static void actualizar_paginas(void) {
+    uint32_t ahora = tiempo_ms();
+    if (modo == 2 && resultado_disponible &&
+        (int32_t)(ahora - siguiente_pagina) >= 0) {
+        pagina_resultado = (pagina_resultado + 1) % 4;
+        mostrar_resultado();
+        siguiente_pagina = ahora + 2000UL;
+    }
 }
 
 static void detectar_color(void) {
@@ -613,8 +642,8 @@ static void detectar_color(void) {
         uart_num(calibracion.referencia[mas_cercano][canal]);
         uart_print(" | Diferencia=");
         uart_num(
-            (int)lectura[canal] -
-            (int)calibracion.referencia[mas_cercano][canal]
+            (int32_t)lectura[canal] -
+            (int32_t)calibracion.referencia[mas_cercano][canal]
         );
         uart_line("");
     }
@@ -623,6 +652,9 @@ static void detectar_color(void) {
         uart_line("Fuera del umbral: servo centrado a 90 grados.");
     }
 
+    resultado_disponible = true;
+    pagina_resultado = 0;
+    siguiente_pagina = tiempo_ms() + 2000UL;
     mostrar_resultado();
     uart_line("Presione el boton para detectar otro color.");
 }
@@ -650,6 +682,7 @@ static void procesar_comando(char *texto) {
     } else if (strcmp(texto, "referencias") == 0) {
         imprimir_referencias();
     } else if (strcmp(texto, "calibrar") == 0 || strcmp(texto, "1") == 0) {
+        resultado_disponible = false;
         modo = 1;
         paso_cal = 0;
         memset(&candidata, 0, sizeof(candidata));
@@ -661,6 +694,7 @@ static void procesar_comando(char *texto) {
             return;
         }
 
+        resultado_disponible = false;
         modo = 2;
         boton_atendido = false;
         uart_line("Deteccion activa. Presione el boton para leer.");
@@ -723,9 +757,12 @@ int main(void) {
                 calibracion.crc == calcular_crc(&calibracion);
 
     mostrar_menu();
+    reloj_init();
+    sei();
 
     for (;;) {
         leer_comandos();
+        actualizar_paginas();
 
         if (modo == 2 && boton_presionado()) {
             detectar_color();
