@@ -25,7 +25,7 @@ def interpretar_a(linea):
         return None
     ms, t, pm, inferior, superior, calor, nivel, pwm, ok = map(int, resultado.groups())
     if not (8 <= pm <= 25 and inferior == pm - 6 and superior == pm + 3):
-        raise ValueError("Configuracion de A fuera del protocolo revisado")
+        raise ValueError("Configuracion de A no valida")
     if pwm != nivel * 85 or (calor and nivel):
         raise ValueError("Estados de actuadores incompatibles")
     if ok and not 0 <= t <= 50:

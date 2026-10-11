@@ -238,7 +238,7 @@ void leds_iniciar(void)
 void ventilador(uint8_t nivel)
 {
     /* Los LED conservan la indicacion original; D3 entrega el PWM real.
-     * Falta ensayar un ventilador con transistor/MOSFET y alimentacion.
+     * La salida PWM requiere una etapa de potencia para controlar un ventilador.
      */
     nivel_ventilador = nivel;
     pwm_ventilador = nivel * 85u; /* 0, 85, 170, 255. */
@@ -274,7 +274,7 @@ void enviar_medicion(void)
     uint32_t segundos;
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { segundos = reloj_segundos; }
     /* A1: cada linea incluye todos los datos necesarios para graficar.
-     * MS es tiempo del micro; OK=0 conserva el fallo sin inventar T.
+     * MS es tiempo del micro; OK=0 indica que la lectura no es valida.
      */
     serie_texto("A1,MS=");
     char digitos[10];
