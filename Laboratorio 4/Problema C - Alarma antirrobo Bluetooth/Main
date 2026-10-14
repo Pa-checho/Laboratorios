@@ -1,0 +1,84 @@
+#define F_CPU 16000000UL
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdint.h>
+
+#define UART_BAUD 9600UL
+#define UART_UBRR ((F_CPU / (16UL * UART_BAUD)) - 1UL)
+
+static void uart_init(void)
+{
+	UBRR0H = (uint8_t)(UART_UBRR >> 8);
+	UBRR0L = (uint8_t)UART_UBRR;
+	UCSR0A = 0;
+	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); /* 8 bits, no parity, 1 stop */
+}
+
+static void uart_send_char(char value)
+{
+	while (!(UCSR0A & (1 << UDRE0))) {
+	}
+	UDR0 = value;
+}
+
+static void uart_send_text(const char *text)
+{
+	while (*text) {
+		uart_send_char(*text++);
+	}
+}
+
+static void uart_send_number(uint16_t value)
+{
+	char digits[5];
+	uint8_t count = 0;
+
+	if (value == 0) {
+		uart_send_char('0');
+		return;
+	}
+
+	while (value > 0) {
+		digits[count++] = (char)('0' + (value % 10));
+		value /= 10;
+	}
+
+	while (count > 0) {
+		uart_send_char(digits[--count]);
+	}
+}
+
+static void adc_init(void)
+{
+	/* AVcc reference, ADC0 (A0) input. */
+	ADMUX = (1 << REFS0);
+
+	/* Enable ADC; prescaler 128 gives a 125 kHz ADC clock at 16 MHz. */
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+}
+
+static uint16_t adc_read_a0(void)
+{
+	ADCSRA |= (1 << ADSC);
+	while (ADCSRA & (1 << ADSC)) {
+	}
+	return ADC;
+}
+
+int main(void)
+{
+	uart_init();
+	adc_init();
+
+	while (1) {
+		uint16_t reading = adc_read_a0();
+		uart_send_text("LECTURA_LDR:");
+		uart_send_number(reading);
+		uart_send_text("\r\n");
+		_delay_ms(500);
+	}
+}
+
+
