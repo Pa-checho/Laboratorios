@@ -1,6 +1,7 @@
 /* PROBLEMA B - ESCLAVO - AVR-GCC / Microchip Studio / ATmega328P.
  * Compilar como OTRO proyecto: cada micro tiene su propio main().
- * Timer0: 1 ms. Timer1: servo 50 Hz. Timer2: PWM del motor en OC2B/PD3.
+ * Timer0: 1 ms y tono de 500 Hz en PD2 para buzzer PASIVO.
+ * Timer1: servo 50 Hz. Timer2: PWM del motor en OC2B/PD3.
  */
 #ifndef F_CPU
 #define F_CPU 16000000UL
@@ -49,7 +50,8 @@ static void parar(uint8_t con_alarma)
     PORTD &= ~((1 << PD4) | (1 << PD5) | (1 << PD6));
     OCR1A = (uint16_t)SERVO_TICKS(SERVO_REPOSO_US);
     fase_servo = 0; tiempo_servo = 0;
-    if (con_alarma) PORTD |= (1 << PD7) | (1 << PD2);
+    // Conserva la fase del tono ante reenvios de emergencia cada 100 ms.
+    if (con_alarma) PORTD |= (1 << PD7);
     else PORTD &= ~((1 << PD7) | (1 << PD2));
 }
 
@@ -111,6 +113,10 @@ ISR(TIMER0_COMPA_vect)
         sin_trama++;
         if (sin_trama == LIMITE_ENLACE_MS) parar(1);
     }
+    // Alterna PD2 cada 1 ms: periodo de 2 ms = tono de 500 Hz.
+    // No usa esperas; el servo y el PWM del motor conservan sus timers.
+    if (alarma) PORTD ^= (1 << PD2);
+    else PORTD &= ~(1 << PD2);               // Silencio: salida en bajo.
     if (fase_servo) {
         tiempo_servo++;
         if (fase_servo == 1 && tiempo_servo >= TIEMPO_EXTENDIDO_MS) {
@@ -124,7 +130,7 @@ ISR(TIMER0_COMPA_vect)
 
 int main(void)
 {
-    // PD2=buzzer, PD3=ENA/PWM, PD4=IN1, PD5=IN2, PD6=verde, PD7=rojo.
+    // PD2=buzzer pasivo, PD3=ENA/PWM, PD4=IN1, PD5=IN2, PD6=verde, PD7=rojo.
     PORTD = 0;
     DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
             (1 << PD5) | (1 << PD6) | (1 << PD7);

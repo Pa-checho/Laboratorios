@@ -64,7 +64,7 @@ Usar los nombres de puerto AVR para evitar confundir encapsulados DIP-28 y de 32
 
 Motor en esta etapa: puente L293D/L298N, ENA a PD3, IN1 a PD4 e IN2 a PD5, un solo sentido de giro. Alimentar potencia segun motor y driver, con GND comun.
 
-Alarma en esta etapa: buzzer activo apto para su alimentacion. Positivo a +5 V, negativo al colector de BC547, emisor a GND y base desde PD2 mediante 2,2 kohm. La alarma aplica nivel alto continuo a PD2.
+Alarma: buzzer pasivo apto para su alimentacion. Positivo a +5 V, negativo al colector de BC547, emisor a GND y base desde PD2 mediante 2,2 kohm. Para piezo pasivo, resistencia de 4,7 kohm en paralelo para descargarlo. Timer0 alterna PD2 cada 1 ms: tono de 500 Hz. STOP deja PD2 en bajo; los reenvios de emergencia no reinician la fase. Timer1 y Timer2 conservan sus funciones.
 
 LEDs: salida -> 330 ohm -> anodo; catodo a GND. Servo: positivo a 5 V regulados, negativo a GND comun y senal a PB1. Usar fuente con capacidad para el servo; no alimentarlo desde un pin del micro.
 
@@ -89,3 +89,7 @@ Maestro: Timer0 base de 1 ms y Timer1 para medir DHT11. Esclavo: Timer0 base de 
 Los fuentes iniciales se compilaron con AVR-GCC para ATmega328P a 8 y 16 MHz, `-Os -Wall -Wextra -Werror`, sin advertencias. A 16 MHz: maestro 4048 bytes de programa/118 bytes de RAM estatica; esclavo 912/10 bytes. Estas cifras corresponden exclusivamente a la version inicial y no incluyen pila.
 
 Consigna de referencia: Problema B de Laboratorio 4.pdf proporcionado para el trabajo.
+
+## Cambio a buzzer pasivo
+
+Se sustituyo el buzzer activo por uno pasivo y se agrego el tono al Timer0 del esclavo, sin esperas adicionales. Los HEX actualizados se generan en Microchip Studio; las cifras de memoria anteriores no describen esta revision.
