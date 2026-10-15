@@ -3,9 +3,34 @@
 #include <avr/io.h>
 #include <util/delay.h>
 #include <stdint.h>
+#include <string.h>
 
 #define UART_BAUD 9600UL
 #define UART_UBRR ((F_CPU / (16UL * UART_BAUD)) - 1UL)
+#define UMBRAL_LDR_ABIERTA 500U
+
+#define PIN_MOVIMIENTO PD2
+#define LED_VERDE PB0   /* Arduino D8 */
+#define LED_ROJO PB1    /* Arduino D9 */
+#define BUZZER PB2      /* Arduino D10, a través del BC547 */
+
+typedef enum {
+	MODO_AUTO,
+	MODO_MANUAL,
+	MODO_FORZADO
+} modo_t;
+
+typedef enum {
+	DESARMADA,
+	ARMADA_AUTO,
+	ARMADA_MANUAL,
+	ALARMA_SONANDO,
+	ALARMA_SILENCIADA
+} estado_t;
+
+static estado_t estado = DESARMADA;
+static modo_t modo = MODO_AUTO;
+static uint8_t ventana_abierta = 0;
 
 static void uart_init(void)
 {
@@ -13,7 +38,7 @@ static void uart_init(void)
 	UBRR0L = (uint8_t)UART_UBRR;
 	UCSR0A = 0;
 	UCSR0B = (1 << RXEN0) | (1 << TXEN0);
-	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); /* 8 bits, no parity, 1 stop */
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); /* 8 bits, sin paridad, 1 stop */
 }
 
 static void uart_send_char(char value)
@@ -50,12 +75,21 @@ static void uart_send_number(uint16_t value)
 	}
 }
 
+static uint8_t uart_read_char(char *value)
+{
+	if (!(UCSR0A & (1 << RXC0))) {
+		return 0;
+	}
+	*value = UDR0;
+	return 1;
+}
+
 static void adc_init(void)
 {
-	/* AVcc reference, ADC0 (A0) input. */
-	ADMUX = (1 << REFS0);
+	DDRC &= ~(1 << DDC0);
+	PORTC &= ~(1 << PORTC0);
 
-	/* Enable ADC; prescaler 128 gives a 125 kHz ADC clock at 16 MHz. */
+	ADMUX = (1 << REFS0); /* Referencia AVcc y canal ADC0 (A0). */
 	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 }
 
@@ -67,18 +101,247 @@ static uint16_t adc_read_a0(void)
 	return ADC;
 }
 
-int main(void)
+static void outputs_update(void)
 {
-	uart_init();
-	adc_init();
+	uint8_t outputs = PORTB & ~((1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER));
 
-	while (1) {
-		uint16_t reading = adc_read_a0();
-		uart_send_text("LECTURA_LDR:");
-		uart_send_number(reading);
-		uart_send_text("\r\n");
-		_delay_ms(500);
+	if (estado == ARMADA_AUTO || estado == ARMADA_MANUAL ||
+	estado == ALARMA_SILENCIADA) {
+		outputs |= (1 << LED_VERDE);
+	}
+
+	if (estado == ALARMA_SONANDO || estado == ALARMA_SILENCIADA) {
+		outputs |= (1 << LED_ROJO);
+	}
+
+	if (estado == ALARMA_SONANDO) {
+		outputs |= (1 << BUZZER);
+	}
+
+	PORTB = outputs;
+}
+
+static void send_status(void)
+{
+	switch (estado) {
+		case DESARMADA:
+		uart_send_text("ESTADO:DESARMADA\r\n");
+		break;
+		case ARMADA_AUTO:
+		uart_send_text("ESTADO:ARMADA_AUTO\r\n");
+		break;
+		case ARMADA_MANUAL:
+		uart_send_text("ESTADO:ARMADA_MANUAL\r\n");
+		break;
+		case ALARMA_SONANDO:
+		uart_send_text("ESTADO:ALARMA_SONANDO;MODO:");
+		uart_send_text(modo == MODO_AUTO ? "AUTO\r\n" :
+		modo == MODO_MANUAL ? "MANUAL\r\n" : "FORZADO\r\n");
+		break;
+		case ALARMA_SILENCIADA:
+		uart_send_text("ESTADO:ALARMA_SILENCIADA;MODO:");
+		uart_send_text(modo == MODO_AUTO ? "AUTO\r\n" :
+		modo == MODO_MANUAL ? "MANUAL\r\n" : "FORZADO\r\n");
+		break;
 	}
 }
 
+static void send_menu(void)
+{
+	uart_send_text("\r\n=== MENU DE LA ALARMA ===\r\n");
+	uart_send_text("ALARMA_AUTO   - Armar en modo automatico\r\n");
+	uart_send_text("ALARMA_MANUAL - Armar en modo manual\r\n");
+	uart_send_text("DESACTIVAR    - Desarmar la alarma\r\n");
+	uart_send_text("SILENCIO      - Silenciar hasta desarmar\r\n");
+	uart_send_text("FORZAR        - Activar la sirena manualmente\r\n");
+	uart_send_text("ESTADO        - Consultar el estado actual\r\n");
+	uart_send_text("LECTURA       - Leer el valor ADC del LDR en A0\r\n");
+	uart_send_text("Escribe un comando y presiona Enter.\r\n\r\n");
+}
 
+static void report_zone(const char *zone)
+{
+	if (estado == DESARMADA) {
+		return;
+	}
+
+	if (estado == ALARMA_SILENCIADA) {
+		uart_send_text("EVENTO:");
+		uart_send_text(zone);
+		uart_send_text(";ALARMA:SILENCIADA\r\n");
+		return;
+	}
+
+	if (estado == ALARMA_SONANDO) {
+		uart_send_text("EVENTO:");
+		uart_send_text(zone);
+		uart_send_text(";ALARMA:SONANDO\r\n");
+		return;
+	}
+
+	if (modo == MODO_MANUAL) {
+		uart_send_text("EVENTO:");
+		uart_send_text(zone);
+		uart_send_text(";MODO:MANUAL\r\n");
+		return;
+	}
+
+	estado = ALARMA_SONANDO;
+	outputs_update();
+	uart_send_text("ALARMA:SONANDO;ZONA:");
+	uart_send_text(zone);
+	uart_send_text("\r\n");
+}
+
+static void arm_auto(void)
+{
+	if (estado == ALARMA_SONANDO) {
+		uart_send_text("ERROR:ALARMA_SONANDO\r\n");
+		return;
+	}
+
+	modo = MODO_AUTO;
+	if (estado != ALARMA_SILENCIADA) {
+		estado = ARMADA_AUTO;
+	}
+	outputs_update();
+
+	if (ventana_abierta) {
+		report_zone("VENTANA");
+		} else {
+		send_status();
+	}
+}
+
+static void arm_manual(void)
+{
+	if (estado == ALARMA_SONANDO) {
+		uart_send_text("ERROR:ALARMA_SONANDO\r\n");
+		return;
+	}
+
+	modo = MODO_MANUAL;
+	if (estado != ALARMA_SILENCIADA) {
+		estado = ARMADA_MANUAL;
+	}
+	outputs_update();
+
+	if (ventana_abierta) {
+		uart_send_text("EVENTO:VENTANA;MODO:MANUAL\r\n");
+		} else {
+		send_status();
+	}
+}
+
+static void force_alarm(void)
+{
+	if (estado == ALARMA_SILENCIADA) {
+		uart_send_text("ALARMA:SILENCIADA\r\n");
+		return;
+	}
+
+	if (estado == DESARMADA) {
+		modo = MODO_FORZADO;
+	}
+
+	estado = ALARMA_SONANDO;
+	outputs_update();
+	uart_send_text("ALARMA:SONANDO;ZONA:FORZADA\r\n");
+}
+
+static void process_command(const char *command)
+{
+	if (strcmp(command, "ALARMA_AUTO") == 0) {
+		arm_auto();
+		} else if (strcmp(command, "ALARMA_MANUAL") == 0) {
+		arm_manual();
+		} else if (strcmp(command, "DESACTIVAR") == 0) {
+		estado = DESARMADA;
+		outputs_update();
+		send_status();
+		} else if (strcmp(command, "SILENCIO") == 0) {
+		if (estado == ALARMA_SONANDO) {
+			estado = ALARMA_SILENCIADA;
+			outputs_update();
+			uart_send_text("ALARMA:SILENCIADA\r\n");
+			} else {
+			uart_send_text("ERROR:ALARMA_NO_ACTIVA\r\n");
+		}
+		} else if (strcmp(command, "FORZAR") == 0) {
+		force_alarm();
+		} else if (strcmp(command, "ESTADO") == 0) {
+		send_status();
+		} else if (strcmp(command, "LECTURA") == 0) {
+		uart_send_text("LECTURA_ADC:");
+		uart_send_number(adc_read_a0());
+		uart_send_text("\r\n");
+		} else if (command[0] != '\0') {
+		uart_send_text("ERROR:COMANDO_DESCONOCIDO\r\n");
+	}
+
+	if (command[0] != '\0') {
+		send_menu();
+	}
+}
+
+int main(void)
+{
+	char command[32];
+	uint8_t command_length = 0;
+	uint8_t button_history = 0;
+	uint8_t button_stable_pressed = 0;
+	uint8_t ldr_sample_counter = 0;
+
+	DDRB |= (1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER);
+	outputs_update();
+
+	DDRD &= ~(1 << PIN_MOVIMIENTO);
+	PORTD |= (1 << PIN_MOVIMIENTO); /* Botón entre D2 y GND. */
+
+	uart_init();
+	adc_init();
+	ventana_abierta = (adc_read_a0() >= UMBRAL_LDR_ABIERTA);
+	send_menu();
+	send_status();
+
+	while (1) {
+		char received;
+
+		if (uart_read_char(&received)) {
+			if (received == '\r' || received == '\n') {
+				command[command_length] = '\0';
+				process_command(command);
+				command_length = 0;
+				} else if (command_length < sizeof(command) - 1) {
+				command[command_length++] = received;
+				} else {
+				command_length = 0;
+				uart_send_text("ERROR:COMANDO_DEMASIADO_LARGO\r\n");
+			}
+		}
+
+		button_history = (uint8_t)((button_history << 1) |
+		((PIND & (1 << PIN_MOVIMIENTO)) == 0));
+		if (button_history == 0xFF && !button_stable_pressed) {
+			button_stable_pressed = 1;
+			report_zone("MOVIMIENTO");
+			} else if (button_history == 0x00) {
+			button_stable_pressed = 0;
+		}
+
+		if (++ldr_sample_counter >= 10) {
+			uint8_t current_window_open =
+			(adc_read_a0() >= UMBRAL_LDR_ABIERTA);
+			ldr_sample_counter = 0;
+
+			if (current_window_open != ventana_abierta) {
+				ventana_abierta = current_window_open;
+				if (ventana_abierta) {
+					report_zone("VENTANA");
+				}
+			}
+		}
+
+		_delay_ms(1);
+	}
+}
