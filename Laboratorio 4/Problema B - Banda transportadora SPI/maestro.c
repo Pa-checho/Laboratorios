@@ -204,12 +204,30 @@ static void detener_emergencia(uint8_t sensor)
 
 static void mostrar_lcd(uint32_t ahora)
 {
-    char linea[17], t[4];
-    if (temp_valida) snprintf(t, sizeof(t), "%02u", (unsigned)temperatura);
-    else { t[0] = '-'; t[1] = '-'; t[2] = '\0'; }
+    char linea[17];
     char e = estado == MARCHA ? 'M' : estado == PARADO ? 'P' : 'E';
     unsigned porcentaje = (uint16_t)velocidad * 100U / 255U;
-    snprintf(linea, sizeof(linea), "%c T:%sC V:%3u%%", e, t, porcentaje);
+
+    // Primera fila: construye los 16 caracteres directamente.
+    // Evita una cadena temporal y el formato anidado de la temperatura.
+    for (uint8_t i = 0; i < 16; i++) linea[i] = ' ';
+    linea[16] = '\0';
+    linea[0] = e;
+    linea[2] = 'T';
+    linea[3] = ':';
+    if (temp_valida) {
+        linea[4] = '0' + temperatura / 10;    // Decenas: usa la misma T del control.
+        linea[5] = '0' + temperatura % 10;    // Unidades.
+    } else {
+        linea[4] = '-'; linea[5] = '-';       // Todavia no hay lectura valida.
+    }
+    linea[6] = 'C';
+    linea[8] = 'V';
+    linea[9] = ':';
+    if (porcentaje == 100) linea[10] = '1';
+    if (porcentaje >= 10) linea[11] = '0' + (porcentaje / 10) % 10;
+    linea[12] = '0' + porcentaje % 10;
+    linea[13] = '%';
     lcd_linea(0, linea);
     if ((ahora / 1200UL) % 2 == 0) {
         snprintf(linea, sizeof(linea), "P:%05lu L:%04u",
