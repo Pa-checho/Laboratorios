@@ -93,3 +93,9 @@ Consigna de referencia: Problema B de Laboratorio 4.pdf proporcionado para el tr
 ## Cambio a buzzer pasivo
 
 Se sustituyo el buzzer activo por uno pasivo y se agrego el tono al Timer0 del esclavo, sin esperas adicionales. Los HEX actualizados se generan en Microchip Studio; las cifras de memoria anteriores no describen esta revision.
+
+## Reloj y servo en Proteus
+
+En ambos modelos: Clock Frequency=16MHz, CKDIV8=(1) Unprogrammed y CKSEL=1111 para cristal externo en rango 8-16 MHz. Agregar cristal de 16 MHz entre XTAL1 y XTAL2, con 22 pF desde cada extremo a GND como ejemplo de simulacion. En el simbolo de 32 pines utilizado: XTAL1/PB6=7 y XTAL2/PB7=8; en DIP-28 son 9/10. En un montaje fisico elegir capacitores segun el cristal. UNO/Nano ya incorpora su reloj; verificarlo antes de modificar fusibles.
+
+Durante el ajuste se observo un pulso de reposo de aproximadamente 2 ms y servo fijo en +90 grados. Tras corregir el reloj se confirmo en Proteus -90 -> 0 -> -90: reposo de 1000 us y accion de 1500 us con los limites del modelo -90/+90. Comprobar periodo de 20 ms con osciloscopio si se requiere medicion; no se aporto una nueva captura de los anchos tras el ajuste. No fue necesario modificar `F_CPU` ni el calculo del PWM del firmware.
