@@ -39,7 +39,7 @@ static void motor_pwm(uint8_t duty)
         OCR2B = 0;
     } else {
         OCR2B = duty;
-        TCCR2A |= (1 << COM2B1);             // PWM no invertido en ENA.
+        TCCR2A |= (1 << COM2B1);             // PWM no invertido hacia Gate del MOSFET.
     }
 }
 
@@ -64,8 +64,8 @@ static void ejecutar(uint8_t cmd, uint8_t valor)
         case CMD_START:
             if (!alarma) {                  // STOP debe reconocer una falla.
                 marcha = 1;
-                PORTD |= (1 << PD4) | (1 << PD6); // IN1=1, LED verde=1.
-                PORTD &= ~(1 << PD5);       // IN2=0: un solo sentido.
+                PORTD |= (1 << PD4) | (1 << PD6); // LED verde=1; PD4 sin conectar.
+                PORTD &= ~(1 << PD5);       // PD5 sin conectar en montaje MOSFET.
                 motor_pwm(valor);
             }
             break;
@@ -130,7 +130,7 @@ ISR(TIMER0_COMPA_vect)
 
 int main(void)
 {
-    // PD2=buzzer pasivo, PD3=ENA/PWM, PD4=IN1, PD5=IN2, PD6=verde, PD7=rojo.
+    // PD2=buzzer pasivo, PD3=Gate/PWM, PD4/PD5=sin conectar, PD6=verde, PD7=rojo.
     PORTD = 0;
     DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) |
             (1 << PD5) | (1 << PD6) | (1 << PD7);

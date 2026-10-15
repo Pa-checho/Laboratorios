@@ -57,12 +57,12 @@ Usar los nombres de puerto AVR para evitar confundir encapsulados DIP-28 y de 32
 | Elemento | Puerto AVR | UNO/Nano |
 |---|---|---|
 | Senal del servo | PB1/OC1A | D9 |
-| Motor ENA/PWM | PD3/OC2B | D3 |
-| Motor IN1, IN2 | PD4, PD5 | D4, D5 |
+| Gate del MOSFET mediante 330 ohm | PD3/OC2B | D3 |
+| Sin conectar | PD4, PD5 | D4, D5 |
 | LED verde, rojo | PD6, PD7 | D6, D7 |
 | Control de alarma | PD2 | D2 |
 
-Motor en esta etapa: puente L293D/L298N, ENA a PD3, IN1 a PD4 e IN2 a PD5, un solo sentido de giro. Alimentar potencia segun motor y driver, con GND comun.
+Motor: etapa discreta IRLZ44N. PD3 -> 330 ohm -> Gate; 10 kohm entre Gate y Source. Source a GND, Drain al negativo del motor; positivo del motor a su fuente. Diodo de rueda libre en paralelo: catodo al positivo del motor y anodo al Drain. Dimensionar segun corriente de arranque/bloqueo. Para ejemplo pequeno de hasta 1 A se considero 1N5819. Agregar 100 nF en paralelo con el motor. PD4 y PD5 se dejan sin conectar. Permite un solo sentido de giro; el PWM de PD3 ya existente sirve para esta etapa, sin cambiar la logica del programa.
 
 Alarma: buzzer pasivo apto para su alimentacion. Positivo a +5 V, negativo al colector de BC547, emisor a GND y base desde PD2 mediante 2,2 kohm. Para piezo pasivo, resistencia de 4,7 kohm en paralelo para descargarlo. Timer0 alterna PD2 cada 1 ms: tono de 500 Hz. STOP deja PD2 en bajo; los reenvios de emergencia no reinician la fase. Timer1 y Timer2 conservan sus funciones.
 
