@@ -102,3 +102,20 @@ Durante el ajuste se observo un pulso de reposo de aproximadamente 2 ms y servo 
 ## Correccion de la primera fila del LCD
 
 Se construyen directamente los 16 caracteres de estado, temperatura y porcentaje en `maestro.c`, reemplazando el formato con una cadena temporal de temperatura. Se utiliza la misma variable de temperatura que decide la emergencia. El usuario confirmo que la revision muestra correctamente temperatura y velocidad en Proteus. Recompilar y cargar el HEX del maestro para aplicar este cambio.
+## Modelo de sonido y pruebas finales
+
+En Proteus, reemplazar el simbolo BUZZER sin modelo por **SOUNDER** de la biblioteca ACTIVE: modelo piezo digital con salida por tarjeta de sonido. Seleccionarlo desde Pick Devices y mantener Exclude from Simulation desmarcado. Positivo a +5 V y negativo al colector del BC547; mantener resistencia de 4,7 kohm en paralelo. El reemplazo del componente no cambia el codigo ni requiere otro HEX.
+
+Se observo una onda cuadrada de aproximadamente 500 Hz, periodo 2 ms y ciclo util del 50 % durante emergencia. Tras sustituir el componente acustico el usuario confirmo el funcionamiento completo de la simulacion.
+
+| Prueba | Resultado confirmado por el usuario |
+|---|---|
+| Arranque | LED verde encendido y motor girando |
+| Oscurecimiento/iluminacion del LDR | Contador aumenta y servo hace -90 -> 0 -> -90 |
+| LCD | Temperatura y velocidad visibles tras la correccion |
+| Sobretemperatura | TX:EMERG, motor detenido y LED rojo |
+| Alarma pasiva | Senal de 500 Hz observada; confirmacion general de funcionamiento tras SOUNDER |
+
+Comprobar de forma separada para completar las evidencias: variacion de velocidad, pieza mantenida sin repeticion, paro manual, rearme a <=37 C con dos pulsaciones separadas (reconocer y arrancar), tres fallos del DHT11 y perdida/recuperacion de SPI. La confirmacion general no sustituye registros individuales de esas pruebas. Las pruebas fisicas siguen pendientes.
+
+Los HEX utilizados en la simulacion fueron generados por el usuario. No hay aqui un registro de compilacion ni cifras de memoria actualizados de la version final; las cifras de la etapa inicial no se presentan como finales. El repositorio contiene los dos fuentes y esta guia, sin binarios obsoletos ni versiones duplicadas. El proyecto de Proteus y las evidencias de informe/video se incorporaran en otra etapa.
