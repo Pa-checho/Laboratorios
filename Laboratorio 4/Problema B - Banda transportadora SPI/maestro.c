@@ -1,6 +1,7 @@
 /* PROBLEMA B - MAESTRO - AVR-GCC / Microchip Studio / ATmega328P.
  * Reloj previsto: 16 MHz (UNO/Nano). F_CPU NO configura el reloj fisico.
- * LCD paralelo HD44780, 4 bits. No usa librerias de Arduino.
+ * LCD 16x2 HD44780 con adaptador I2C PCF8574. SDA=A4, SCL=A5.
+ * No usa librerias de Arduino; TWI e SPI funcionan simultaneamente.
  * Crear un proyecto independiente para este archivo.
  */
 #ifndef F_CPU
@@ -15,6 +16,18 @@
 #include <util/atomic.h>
 #include <stdint.h>
 #include <stdio.h>
+
+/* LCD I2C: 0 busca 0x27 y 0x3F; otra direccion se escribe en 7 bits.
+ * Mapeo habitual del adaptador: P0=RS, P1=RW, P2=E, P3=luz,
+ * P4..P7=D4..D7. RW siempre queda en 0: solo se escribe al LCD.
+ */
+#define LCD_I2C_ADDR       0
+#define I2C_FRECUENCIA     100000UL
+#define I2C_ESPERA_US      2000U
+#define LCD_RS            (1 << 0)
+#define LCD_E             (1 << 2)
+#define LCD_LUZ            (1 << 3)
+static uint8_t lcd_direccion, lcd_disponible;
 
 /* Deben coincidir con los comandos de esclavo.c. */
 #define CMD_START       1
@@ -60,33 +73,105 @@ static void timers_init(void)
     TCCR1B = (1 << CS11);                     // Prescaler 8, libre.
 }
 
-/* LCD: RS=PD4, E=PD5, D4=PD6, D5=PD7, D6=PB0, D7=PB1. */
-static void lcd_nibble(uint8_t n)
+/* TWI es el periferico I2C del ATmega328P. Pull-ups externos si el
+ * adaptador no los incorpora: 4,7 kohm de SDA y SCL a +5 V.
+ */
+static void i2c_init(void)
 {
-    PORTD = (PORTD & ~((1 << PD6) | (1 << PD7))) | ((n & 3) << 6);
-    PORTB = (PORTB & ~((1 << PB0) | (1 << PB1))) | ((n >> 2) & 3);
-    PORTD |= (1 << PD5);
-    _delay_us(1);
-    PORTD &= ~(1 << PD5);
-    _delay_us(50);
+    DDRC &= ~((1 << PC4) | (1 << PC5));       // A4=SDA, A5=SCL.
+    PORTC |= (1 << PC4) | (1 << PC5);         // Pull-ups internos de apoyo.
+    TWSR = 0;                               // Prescaler TWI = 1.
+    TWBR = (uint8_t)((F_CPU / I2C_FRECUENCIA - 16UL) / 2UL);
+    TWCR = (1 << TWEN);                      // 100 kHz a 8 y 16 MHz.
+}
+
+static uint8_t i2c_esperar(void)
+{
+    for (uint16_t i = 0; i < I2C_ESPERA_US; i++) {
+        if (TWCR & (1 << TWINT)) return 1;
+        _delay_us(1);
+    }
+    return 0;                               // Bus bloqueado: no espera siempre.
+}
+
+static uint8_t i2c_stop(void)
+{
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
+    for (uint16_t i = 0; i < I2C_ESPERA_US; i++) {
+        if (!(TWCR & (1 << TWSTO))) return 1;
+        _delay_us(1);
+    }
+    TWCR = 0;                               // Libera el periferico ante timeout.
+    TWCR = (1 << TWEN);
+    return 0;
+}
+
+static uint8_t i2c_start(uint8_t direccion)
+{
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    if (!i2c_esperar()) return 0;
+    uint8_t estado_twi = TWSR & 0xF8;
+    if (estado_twi != 0x08 && estado_twi != 0x10) return 0;
+    TWDR = direccion << 1;                   // Direccion de 7 bits + escritura.
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    if (!i2c_esperar()) return 0;
+    return (TWSR & 0xF8) == 0x18;            // ACK de SLA+W.
+}
+
+static uint8_t i2c_dato(uint8_t dato)
+{
+    TWDR = dato;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    if (!i2c_esperar()) return 0;
+    return (TWSR & 0xF8) == 0x28;            // ACK del byte transmitido.
+}
+
+static uint8_t lcd_detectar(uint8_t direccion)
+{
+    uint8_t ack = i2c_start(direccion);
+    uint8_t fin = i2c_stop();
+    if (ack && fin) {
+        lcd_direccion = direccion;
+        return 1;
+    }
+    return 0;
+}
+
+static void lcd_nibble(uint8_t n, uint8_t es_texto)
+{
+    if (!lcd_disponible) return;
+    uint8_t salida = ((n & 15) << 4) | LCD_LUZ;
+    if (es_texto) salida |= LCD_RS;
+    // Un pulso E por nibble; se conserva RS y la luz en los tres bytes.
+    uint8_t ok = i2c_start(lcd_direccion) &&
+                 i2c_dato(salida) &&
+                 i2c_dato(salida | LCD_E) &&
+                 i2c_dato(salida);
+    uint8_t fin = i2c_stop();                 // STOP incluso si hubo NACK.
+    if (!ok || !fin) lcd_disponible = 0;      // Control SPI sigue funcionando.
+    _delay_us(50);                           // Tiempo de ejecucion del HD44780.
 }
 
 static void lcd_byte(uint8_t dato, uint8_t es_texto)
 {
-    if (es_texto) PORTD |= (1 << PD4);
-    else PORTD &= ~(1 << PD4);
-    lcd_nibble(dato >> 4);
-    lcd_nibble(dato & 15);
+    lcd_nibble(dato >> 4, es_texto);
+    lcd_nibble(dato & 15, es_texto);
 }
 
 static void lcd_init(void)
 {
-    DDRD |= (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);
-    DDRB |= (1 << PB0) | (1 << PB1);
-    _delay_ms(40);
-    lcd_nibble(3); _delay_ms(5);
-    lcd_nibble(3); _delay_us(150);
-    lcd_nibble(3); lcd_nibble(2);              // Pasa a interfaz de 4 bits.
+    i2c_init();
+    _delay_ms(50);                           // Espera alimentacion del LCD.
+#if LCD_I2C_ADDR == 0
+    lcd_disponible = lcd_detectar(0x27);
+    if (!lcd_disponible) lcd_disponible = lcd_detectar(0x3F);
+#else
+    lcd_disponible = lcd_detectar(LCD_I2C_ADDR);
+#endif
+    if (!lcd_disponible) return;             // Conectar/revisar LCD y reiniciar.
+    lcd_nibble(3, 0); _delay_ms(5);
+    lcd_nibble(3, 0); _delay_us(150);
+    lcd_nibble(3, 0); lcd_nibble(2, 0);        // Pasa a interfaz de 4 bits.
     lcd_byte(0x28, 0);                        // 2 filas, matriz 5x8.
     lcd_byte(0x0C, 0);                        // Pantalla ON, cursor OFF.
     lcd_byte(0x06, 0);                        // Cursor avanza al escribir.
