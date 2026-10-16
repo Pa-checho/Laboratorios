@@ -33,6 +33,7 @@ static estado_t estado = DESARMADA;
 static modo_t modo = MODO_AUTO;
 static uint8_t ventana_abierta = 0;
 static char zona_alarma[12] = "";
+static char ultimo_evento_manual[12] = "";
 static char lcd_ultima_linea_1[16];
 static char lcd_ultima_linea_2[16];
 
@@ -137,8 +138,16 @@ static void lcd_update(void)
 		state_text = "DESARMADA";
 		break;
 		case ARMADA_AUTO:
-		case ARMADA_MANUAL:
 		state_text = "ARMADA";
+		break;
+		case ARMADA_MANUAL:
+		if (strcmp(ultimo_evento_manual, "VENTANA") == 0) {
+			state_text = "EVENTO:VENTANA";
+			} else if (strcmp(ultimo_evento_manual, "MOVIMIENTO") == 0) {
+			state_text = "EVENTO:MOVIM.";
+			} else {
+			state_text = "ARMADA";
+		}
 		break;
 		case ALARMA_SILENCIADA:
 		state_text = "SILENCIADA";
@@ -260,13 +269,13 @@ static void send_status(void)
 static void send_menu(void)
 {
 	uart_send_text("\r\n=== MENU DE LA ALARMA ===\r\n");
-	uart_send_text("ALARMA_AUTO   - Armar en modo automatico\r\n");
-	uart_send_text("ALARMA_MANUAL - Armar en modo manual\r\n");
-	uart_send_text("DESACTIVAR    - Desarmar la alarma\r\n");
-	uart_send_text("SILENCIO      - Silenciar hasta desarmar\r\n");
-	uart_send_text("FORZAR        - Activar la sirena manualmente\r\n");
-	uart_send_text("ESTADO        - Consultar el estado actual\r\n");
-	uart_send_text("Escribe un comando y presiona Enter.\r\n\r\n");
+	uart_send_text("1 - ALARMA_AUTO   - Armar en modo automatico\r\n");
+	uart_send_text("2 - ALARMA_MANUAL - Armar en modo manual\r\n");
+	uart_send_text("3 - DESACTIVAR    - Desarmar la alarma\r\n");
+	uart_send_text("4 - SILENCIO      - Silenciar hasta desarmar\r\n");
+	uart_send_text("5 - FORZAR        - Activar la sirena manualmente\r\n");
+	uart_send_text("6 - ESTADO        - Consultar el estado actual\r\n");
+	uart_send_text("Escribe el numero y presiona Enter.\r\n\r\n");
 }
 
 static void report_zone(const char *zone)
@@ -283,6 +292,8 @@ static void report_zone(const char *zone)
 	}
 
 	if (estado == ALARMA_SONANDO) {
+		strncpy(zona_alarma, zone, sizeof(zona_alarma) - 1);
+		zona_alarma[sizeof(zona_alarma) - 1] = '\0';
 		uart_send_text("EVENTO:");
 		uart_send_text(zone);
 		uart_send_text(";ALARMA:SONANDO\r\n");
@@ -290,6 +301,8 @@ static void report_zone(const char *zone)
 	}
 
 	if (modo == MODO_MANUAL) {
+		strncpy(ultimo_evento_manual, zone, sizeof(ultimo_evento_manual) - 1);
+		ultimo_evento_manual[sizeof(ultimo_evento_manual) - 1] = '\0';
 		uart_send_text("EVENTO:");
 		uart_send_text(zone);
 		uart_send_text(";MODO:MANUAL\r\n");
@@ -312,6 +325,7 @@ static void arm_auto(void)
 		return;
 	}
 
+	ultimo_evento_manual[0] = '\0';
 	modo = MODO_AUTO;
 	if (estado != ALARMA_SILENCIADA) {
 		estado = ARMADA_AUTO;
@@ -332,6 +346,7 @@ static void arm_manual(void)
 		return;
 	}
 
+	ultimo_evento_manual[0] = '\0';
 	modo = MODO_MANUAL;
 	if (estado != ALARMA_SILENCIADA) {
 		estado = ARMADA_MANUAL;
@@ -339,6 +354,7 @@ static void arm_manual(void)
 	outputs_update();
 
 	if (ventana_abierta) {
+		strcpy(ultimo_evento_manual, "VENTANA");
 		uart_send_text("EVENTO:VENTANA;MODO:MANUAL\r\n");
 		} else {
 		send_status();
@@ -364,16 +380,17 @@ static void force_alarm(void)
 
 static void process_command(const char *command)
 {
-	if (strcmp(command, "ALARMA_AUTO") == 0) {
+	if (strcmp(command, "1") == 0) {
 		arm_auto();
-		} else if (strcmp(command, "ALARMA_MANUAL") == 0) {
+		} else if (strcmp(command, "2") == 0) {
 		arm_manual();
-		} else if (strcmp(command, "DESACTIVAR") == 0) {
+		} else if (strcmp(command, "3") == 0) {
 		estado = DESARMADA;
 		zona_alarma[0] = '\0';
+		ultimo_evento_manual[0] = '\0';
 		outputs_update();
 		send_status();
-		} else if (strcmp(command, "SILENCIO") == 0) {
+		} else if (strcmp(command, "4") == 0) {
 		if (estado == ALARMA_SONANDO) {
 			estado = ALARMA_SILENCIADA;
 			outputs_update();
@@ -381,9 +398,9 @@ static void process_command(const char *command)
 			} else {
 			uart_send_text("ERROR:ALARMA_NO_ACTIVA\r\n");
 		}
-		} else if (strcmp(command, "FORZAR") == 0) {
+		} else if (strcmp(command, "5") == 0) {
 		force_alarm();
-		} else if (strcmp(command, "ESTADO") == 0) {
+		} else if (strcmp(command, "6") == 0) {
 		send_status();
 		} else if (command[0] != '\0') {
 		uart_send_text("ERROR:COMANDO_DESCONOCIDO\r\n");
