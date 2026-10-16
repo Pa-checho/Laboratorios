@@ -1,7 +1,6 @@
 /*
  * Laboratorio 4 - Problema D
- * Base de hardware para el juego de memoria.
- * Microcontrolador: ATmega328P a 16 MHz.
+ * Juego de memoria para ATmega328P a 16 MHz.
  *
  * Conexiones:
  *   PD6 / D6  -> DIN de la matriz WS2812B 8x8
@@ -25,6 +24,7 @@
 #define COLUMNAS 8U
 #define N_PIXELES 64U
 #define CANTIDAD_COLORES 4U
+#define NIVEL_MAXIMO 20U
 
 #define PIN_WS PD6
 #define PIN_BOTON PD2
@@ -34,6 +34,11 @@
 #define UMBRAL_ALTO 700U
 #define BRILLO 40U
 
+#define ARRIBA 0U
+#define ABAJO 1U
+#define IZQUIERDA 2U
+#define DERECHA 3U
+
 typedef struct {
     uint8_t r;
     uint8_t g;
@@ -41,6 +46,13 @@ typedef struct {
     uint16_t frecuencia;
     const char *nombre;
 } color_t;
+
+typedef struct {
+    uint8_t fila;
+    uint8_t columna;
+    uint8_t color;
+    uint8_t direccion;
+} paso_t;
 
 static const color_t colores[CANTIDAD_COLORES] = {
     {255U, 0U, 0U, 262U, "ROJO"},
@@ -50,11 +62,15 @@ static const color_t colores[CANTIDAD_COLORES] = {
 };
 
 static uint8_t cuadro[N_PIXELES][3];
+static paso_t secuencia[NIVEL_MAXIMO];
+
+static uint8_t nivel = 1U;
 static uint8_t fila_cursor = 3U;
 static uint8_t columna_cursor = 3U;
 static uint8_t color_cursor = 2U;
 static uint8_t joystick_listo = 0U;
 static uint8_t boton_anterior = 1U;
+static uint32_t estado_aleatorio = 1UL;
 
 static void esperar_ms(uint16_t tiempo) {
     while (tiempo-- != 0U) {
@@ -81,7 +97,17 @@ static void uart_texto(const char *texto) {
 }
 
 static void uart_numero(uint8_t numero) {
-    uart_caracter((char)('0' + numero));
+    if (numero >= 100U) {
+        uart_caracter((char)('0' + (numero / 100U)));
+    }
+    if (numero >= 10U) {
+        uart_caracter((char)('0' + ((numero / 10U) % 10U)));
+    }
+    uart_caracter((char)('0' + (numero % 10U)));
+}
+
+static void uart_nueva_linea(void) {
+    uart_texto("\r\n");
 }
 
 static void adc_init(void) {
@@ -178,11 +204,25 @@ static void matriz_mostrar(void) {
     _delay_us(80);
 }
 
+static void matriz_apagar(void) {
+    cuadro_limpiar();
+    matriz_mostrar();
+}
+
 static void mostrar_cursor(void) {
     const color_t *color = &colores[color_cursor];
 
     cuadro_limpiar();
     cuadro_pixel(fila_cursor, columna_cursor,
+                 color->r, color->g, color->b);
+    matriz_mostrar();
+}
+
+static void mostrar_objetivo(const paso_t *paso) {
+    const color_t *color = &colores[paso->color];
+
+    cuadro_limpiar();
+    cuadro_pixel(paso->fila, paso->columna,
                  color->r, color->g, color->b);
     matriz_mostrar();
 }
@@ -220,9 +260,7 @@ static void informar_cursor(void) {
     uart_numero(fila_cursor);
     uart_texto(" COLUMNA=");
     uart_numero(columna_cursor);
-    uart_texto(" COLOR=");
-    uart_texto(colores[color_cursor].nombre);
-    uart_texto("\r\n");
+    uart_nueva_linea();
 }
 
 static void revisar_joystick(void) {
@@ -261,6 +299,205 @@ static void revisar_joystick(void) {
     }
 }
 
+static uint32_t aleatorio_siguiente(void) {
+    estado_aleatorio ^= estado_aleatorio << 13;
+    estado_aleatorio ^= estado_aleatorio >> 17;
+    estado_aleatorio ^= estado_aleatorio << 5;
+    return estado_aleatorio;
+}
+
+static uint8_t aleatorio_hasta(uint8_t limite) {
+    uint16_t parte_alta = (uint16_t)(aleatorio_siguiente() >> 16);
+    return (uint8_t)(((uint32_t)parte_alta * limite) >> 16);
+}
+
+static void aleatorio_mezclar(uint32_t valor) {
+    estado_aleatorio ^= valor + 0x9E3779B9UL +
+                        (estado_aleatorio << 6) +
+                        (estado_aleatorio >> 2);
+    (void)aleatorio_siguiente();
+}
+
+static void aleatorio_sembrar(void) {
+    uint8_t i;
+
+    for (i = 0U; i < 24U; i++) {
+        uint32_t muestra = (uint32_t)adc_leer(0U);
+        muestra ^= (uint32_t)adc_leer(1U) << 10;
+        muestra ^= (uint32_t)adc_leer(2U) << 20;
+        muestra ^= (uint32_t)(adc_leer(3U) & 0x03U) << 30;
+        muestra ^= (uint32_t)TCNT0 * (uint32_t)(i + 1U);
+        aleatorio_mezclar(muestra);
+    }
+
+    if (estado_aleatorio == 0UL) {
+        estado_aleatorio = 1UL;
+    }
+}
+
+static const char *nombre_direccion(uint8_t direccion) {
+    if (direccion == ARRIBA) return "ARRIBA";
+    if (direccion == ABAJO) return "ABAJO";
+    if (direccion == IZQUIERDA) return "IZQUIERDA";
+    return "DERECHA";
+}
+
+static void agregar_paso(uint8_t indice) {
+    uint8_t fila_base = 3U;
+    uint8_t columna_base = 3U;
+    uint8_t candidatas[4];
+    uint8_t cantidad = 0U;
+    uint8_t direccion;
+
+    if (indice > 0U) {
+        fila_base = secuencia[indice - 1U].fila;
+        columna_base = secuencia[indice - 1U].columna;
+    }
+
+    if (fila_base > 0U) candidatas[cantidad++] = ARRIBA;
+    if (fila_base < 7U) candidatas[cantidad++] = ABAJO;
+    if (columna_base > 0U) candidatas[cantidad++] = IZQUIERDA;
+    if (columna_base < 7U) candidatas[cantidad++] = DERECHA;
+
+    direccion = candidatas[aleatorio_hasta(cantidad)];
+    secuencia[indice].fila = fila_base;
+    secuencia[indice].columna = columna_base;
+    secuencia[indice].direccion = direccion;
+    secuencia[indice].color = aleatorio_hasta(CANTIDAD_COLORES);
+
+    if (direccion == ARRIBA) secuencia[indice].fila--;
+    if (direccion == ABAJO) secuencia[indice].fila++;
+    if (direccion == IZQUIERDA) secuencia[indice].columna--;
+    if (direccion == DERECHA) secuencia[indice].columna++;
+}
+
+static void reproducir_secuencia(void) {
+    uint8_t i;
+
+    uart_texto("--- MEMORICE LA SECUENCIA ---\r\n");
+    for (i = 0U; i < nivel; i++) {
+        const paso_t *paso = &secuencia[i];
+        const color_t *color = &colores[paso->color];
+
+        uart_texto("PASO ");
+        uart_numero((uint8_t)(i + 1U));
+        uart_texto(": ");
+        uart_texto(nombre_direccion(paso->direccion));
+        uart_texto(" | COLOR: ");
+        uart_texto(color->nombre);
+        uart_texto(" | POSICION: ");
+        uart_numero(paso->fila);
+        uart_caracter(',');
+        uart_numero(paso->columna);
+        uart_nueva_linea();
+
+        mostrar_objetivo(paso);
+        tono(color->frecuencia, 250U);
+        esperar_ms(250U);
+        matriz_apagar();
+        esperar_ms(200U);
+    }
+}
+
+static uint8_t turno_jugador(void) {
+    uint8_t paso_jugador = 0U;
+
+    fila_cursor = 3U;
+    columna_cursor = 3U;
+    joystick_listo = 0U;
+    mostrar_cursor();
+
+    uart_texto("--- SU TURNO ---\r\n");
+    uart_texto("MUEVA EL CURSOR Y CONFIRME CADA POSICION\r\n");
+
+    for (;;) {
+        revisar_joystick();
+
+        if (evento_boton() != 0U) {
+            const paso_t *esperado = &secuencia[paso_jugador];
+
+            if ((fila_cursor != esperado->fila) ||
+                (columna_cursor != esperado->columna)) {
+                uart_texto("POSICION INCORRECTA\r\n");
+                tono(165U, 400U);
+                matriz_apagar();
+                return 0U;
+            }
+
+            tono(colores[esperado->color].frecuencia, 140U);
+            uart_texto("PASO ");
+            uart_numero((uint8_t)(paso_jugador + 1U));
+            uart_texto(" CORRECTO\r\n");
+            paso_jugador++;
+
+            if (paso_jugador >= nivel) {
+                return 1U;
+            }
+            mostrar_cursor();
+        }
+        esperar_ms(5U);
+    }
+}
+
+static void sonido_nivel_superado(void) {
+    tono(659U, 120U);
+    esperar_ms(40U);
+    tono(784U, 120U);
+    esperar_ms(40U);
+    tono(1047U, 180U);
+}
+
+static void esperar_inicio(void) {
+    fila_cursor = 3U;
+    columna_cursor = 3U;
+    joystick_listo = 0U;
+    mostrar_cursor();
+
+    uart_texto("--- MODO DE ESPERA ---\r\n");
+    uart_texto("MUEVA EL JOYSTICK Y PRESIONE SW PARA JUGAR\r\n");
+
+    for (;;) {
+        revisar_joystick();
+        if (evento_boton() != 0U) {
+            return;
+        }
+        esperar_ms(5U);
+    }
+}
+
+static void jugar_partida(void) {
+    nivel = 1U;
+    aleatorio_sembrar();
+    agregar_paso(0U);
+
+    for (;;) {
+        uart_texto("NIVEL: ");
+        uart_numero(nivel);
+        uart_nueva_linea();
+        esperar_ms(500U);
+        reproducir_secuencia();
+
+        if (turno_jugador() == 0U) {
+            uart_texto("FIN DE LA PARTIDA\r\n");
+            esperar_ms(600U);
+            return;
+        }
+
+        uart_texto("SECUENCIA CORRECTA\r\n");
+        sonido_nivel_superado();
+
+        if (nivel >= NIVEL_MAXIMO) {
+            uart_texto("NIVEL MAXIMO SUPERADO\r\n");
+            matriz_apagar();
+            return;
+        }
+
+        nivel++;
+        agregar_paso((uint8_t)(nivel - 1U));
+        esperar_ms(500U);
+    }
+}
+
 static void hardware_init(void) {
     DDRD |= _BV(PIN_WS);
     PORTD &= (uint8_t)~_BV(PIN_WS);
@@ -271,6 +508,9 @@ static void hardware_init(void) {
     DDRB |= _BV(PIN_BUZZER);
     PORTB &= (uint8_t)~_BV(PIN_BUZZER);
 
+    TCCR0A = 0U;
+    TCCR0B = _BV(CS02) | _BV(CS00);
+
     adc_init();
     uart_init();
 }
@@ -280,20 +520,10 @@ int main(void) {
     esperar_ms(100U);
 
     uart_texto("LABORATORIO 4 - PROBLEMA D\r\n");
-    uart_texto("PRUEBA DE MATRIZ, JOYSTICK Y BUZZER\r\n");
-    mostrar_cursor();
-    tono(colores[color_cursor].frecuencia, 120U);
-    informar_cursor();
+    uart_texto("JUEGO DE MEMORIA\r\n");
 
     for (;;) {
-        revisar_joystick();
-
-        if (evento_boton() != 0U) {
-            color_cursor = (uint8_t)((color_cursor + 1U) % CANTIDAD_COLORES);
-            mostrar_cursor();
-            tono(colores[color_cursor].frecuencia, 120U);
-            informar_cursor();
-        }
-        esperar_ms(5U);
+        esperar_inicio();
+        jugar_partida();
     }
 }
