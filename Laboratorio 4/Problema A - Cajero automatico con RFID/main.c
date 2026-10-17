@@ -7,6 +7,14 @@
 #define BAUDIOS 9600UL
 #define UBRR_VALOR ((F_CPU / (16UL * BAUDIOS)) - 1UL)
 
+#define LCD_RS  0x01U
+#define LCD_EN  0x04U
+#define LCD_LUZ 0x08U
+
+#define LED_VERDE PC1
+#define LED_ROJO  PC2
+#define BUZZER    PC3
+
 #define RC522_RST PB1
 #define RC522_SS  PB2
 #define SPI_MOSI  PB3
@@ -40,6 +48,9 @@
 #define PICC_REQA         0x26U
 #define PICC_ANTICOLL_CL1 0x93U
 #define PICC_HALT         0x50U
+
+static uint8_t lcd_activo;
+static uint8_t lcd_direccion;
 
 static void uart_iniciar(void)
 {
@@ -83,6 +94,247 @@ static void uart_uid(const uint8_t uid[4])
         }
     }
     uart_texto("\r\n");
+}
+
+static void twi_iniciar(void)
+{
+    TWSR = 0;
+    TWBR = 152;
+    TWCR = (1 << TWEN);
+    PORTC |= (1 << PC4) | (1 << PC5);
+}
+
+static uint8_t twi_esperar(void)
+{
+    uint16_t limite = 60000;
+
+    while (!(TWCR & (1 << TWINT))) {
+        if (--limite == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void twi_detener(void)
+{
+    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
+}
+
+static uint8_t twi_comenzar(uint8_t direccion)
+{
+    uint8_t estado;
+
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    if (!twi_esperar()) {
+        return 0;
+    }
+
+    estado = TWSR & 0xF8U;
+    if (estado != 0x08U && estado != 0x10U) {
+        twi_detener();
+        return 0;
+    }
+
+    TWDR = (uint8_t)(direccion << 1);
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    if (!twi_esperar() || (TWSR & 0xF8U) != 0x18U) {
+        twi_detener();
+        return 0;
+    }
+    return 1;
+}
+
+static uint8_t twi_enviar(uint8_t dato)
+{
+    TWDR = dato;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    return twi_esperar() && (TWSR & 0xF8U) == 0x28U;
+}
+
+static uint8_t lcd_expansor(uint8_t dato)
+{
+    uint8_t correcto;
+
+    if (!twi_comenzar(lcd_direccion)) {
+        return 0;
+    }
+    correcto = twi_enviar((uint8_t)(dato | LCD_LUZ));
+    twi_detener();
+    return correcto;
+}
+
+static void lcd_nibble(uint8_t nibble, uint8_t control)
+{
+    uint8_t dato = (uint8_t)((nibble & 0xF0U) | control);
+
+    lcd_expansor((uint8_t)(dato | LCD_EN));
+    _delay_us(1);
+    lcd_expansor((uint8_t)(dato & (uint8_t)~LCD_EN));
+    _delay_us(50);
+}
+
+static void lcd_enviar(uint8_t control, uint8_t dato)
+{
+    if (!lcd_activo) {
+        return;
+    }
+    lcd_nibble(dato, control);
+    lcd_nibble((uint8_t)(dato << 4), control);
+}
+
+static void lcd_comando(uint8_t comando)
+{
+    lcd_enviar(0, comando);
+    if (comando == 0x01U || comando == 0x02U) {
+        _delay_ms(2);
+    }
+}
+
+static void lcd_dato(char dato)
+{
+    lcd_enviar(LCD_RS, (uint8_t)dato);
+}
+
+static void lcd_iniciar(void)
+{
+    static const uint8_t direcciones[] = {0x27U, 0x3FU};
+    uint8_t i;
+
+    lcd_activo = 0;
+    for (i = 0; i < sizeof(direcciones); i++) {
+        if (twi_comenzar(direcciones[i])) {
+            twi_detener();
+            lcd_direccion = direcciones[i];
+            lcd_activo = 1;
+            break;
+        }
+    }
+    if (!lcd_activo) {
+        return;
+    }
+
+    _delay_ms(50);
+    lcd_nibble(0x30U, 0);
+    _delay_ms(5);
+    lcd_nibble(0x30U, 0);
+    _delay_us(150);
+    lcd_nibble(0x30U, 0);
+    lcd_nibble(0x20U, 0);
+    lcd_comando(0x28U);
+    lcd_comando(0x0CU);
+    lcd_comando(0x06U);
+    lcd_comando(0x01U);
+}
+
+static void lcd_linea(uint8_t fila, const char *texto)
+{
+    uint8_t posicion;
+
+    if (!lcd_activo) {
+        return;
+    }
+    lcd_comando(fila == 0 ? 0x80U : 0xC0U);
+    for (posicion = 0; posicion < 16; posicion++) {
+        lcd_dato(*texto != '\0' ? *texto++ : ' ');
+    }
+}
+
+static void lcd_mostrar_uid(const uint8_t uid[4])
+{
+    static const char digitos[] = "0123456789ABCDEF";
+    char linea[17] = "UID:            ";
+    uint8_t i;
+
+    for (i = 0; i < 4; i++) {
+        linea[4U + i * 2U] = digitos[uid[i] >> 4];
+        linea[5U + i * 2U] = digitos[uid[i] & 0x0FU];
+    }
+    lcd_linea(0, "Tarjeta leida");
+    lcd_linea(1, linea);
+}
+
+static void salidas_iniciar(void)
+{
+    DDRC |= (1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER);
+    PORTC &= (uint8_t)~((1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER));
+}
+
+static void indicar_lectura(void)
+{
+    uint16_t i;
+
+    PORTC |= (1 << LED_VERDE);
+    for (i = 0; i < 300; i++) {
+        PORTC ^= (1 << BUZZER);
+        _delay_us(300);
+    }
+    PORTC &= (uint8_t)~((1 << LED_VERDE) | (1 << BUZZER));
+}
+
+static void indicar_error(void)
+{
+    uint16_t i;
+
+    PORTC |= (1 << LED_ROJO);
+    for (i = 0; i < 180; i++) {
+        PORTC ^= (1 << BUZZER);
+        _delay_us(1000);
+    }
+    PORTC &= (uint8_t)~((1 << LED_ROJO) | (1 << BUZZER));
+}
+
+static void teclado_iniciar(void)
+{
+    DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
+    PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
+
+    DDRD &= (uint8_t)~((1 << PD6) | (1 << PD7));
+    PORTD |= (1 << PD6) | (1 << PD7);
+    DDRB &= (uint8_t)~(1 << PB0);
+    PORTB |= (1 << PB0);
+    DDRC &= (uint8_t)~(1 << PC0);
+    PORTC |= (1 << PC0);
+}
+
+static uint8_t columna_presionada(void)
+{
+    if (!(PIND & (1 << PD6))) return 0;
+    if (!(PIND & (1 << PD7))) return 1;
+    if (!(PINB & (1 << PB0))) return 2;
+    if (!(PINC & (1 << PC0))) return 3;
+    return 0xFFU;
+}
+
+static char teclado_leer(void)
+{
+    static const char teclas[4][4] = {
+        {'1', '2', '3', 'A'},
+        {'4', '5', '6', 'B'},
+        {'7', '8', '9', 'C'},
+        {'*', '0', '#', 'D'}
+    };
+    uint8_t fila;
+    uint8_t columna;
+
+    for (fila = 0; fila < 4; fila++) {
+        PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
+        PORTD &= (uint8_t)~(1 << (PD2 + fila));
+        _delay_us(10);
+        columna = columna_presionada();
+        if (columna != 0xFFU) {
+            _delay_ms(25);
+            if (columna_presionada() == columna) {
+                while (columna_presionada() != 0xFFU) {
+                }
+                PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
+                return teclas[fila][columna];
+            }
+        }
+    }
+
+    PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
+    return '\0';
 }
 
 static uint8_t spi_transferir(uint8_t dato)
@@ -317,22 +569,54 @@ static uint8_t rc522_iniciar(void)
 int main(void)
 {
     uint8_t uid[4];
+    char tecla;
+    char mensaje_tecla[17] = "Tecla:          ";
 
     uart_iniciar();
-    uart_texto("\r\nPrueba fisica del lector RC522\r\n");
+    salidas_iniciar();
+    teclado_iniciar();
+    twi_iniciar();
+    lcd_iniciar();
+
+    uart_texto("\r\nPrueba de interfaz fisica del cajero\r\n");
+    if (lcd_activo) {
+        uart_texto("LCD detectado en 0x");
+        uart_hex(lcd_direccion);
+        uart_texto("\r\n");
+    } else {
+        uart_texto("LCD no encontrado en 0x27 ni 0x3F.\r\n");
+    }
 
     if (!rc522_iniciar()) {
         uart_texto("ERROR: revise 3.3 V, GND y las conexiones SPI.\r\n");
+        lcd_linea(0, "Error RC522");
+        lcd_linea(1, "Revise conexion");
+        indicar_error();
         while (1) {
         }
     }
 
-    uart_texto("Lector listo. Acerque una tarjeta.\r\n");
+    uart_texto("Interfaz lista. Pruebe el teclado o acerque una tarjeta.\r\n");
+    lcd_linea(0, "CAJERO FISICO");
+    lcd_linea(1, "Acerque tarjeta");
     while (1) {
+        tecla = teclado_leer();
+        if (tecla != '\0') {
+            uart_texto("Tecla detectada: ");
+            uart_caracter(tecla);
+            uart_texto("\r\n");
+            mensaje_tecla[7] = tecla;
+            lcd_linea(0, "Teclado HX543");
+            lcd_linea(1, mensaje_tecla);
+            indicar_lectura();
+        }
+
         if (rc522_leer_uid(uid)) {
             uart_uid(uid);
+            lcd_mostrar_uid(uid);
+            indicar_lectura();
             uart_texto("Retire la tarjeta antes de leer otra.\r\n");
-            _delay_ms(500);
+            _delay_ms(700);
         }
         _delay_ms(30);
     }
