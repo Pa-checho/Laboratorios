@@ -1,8 +1,3 @@
-/*
- * EJERCICIO E - BURBUJA DE INCLINACION
- * VERSION 2: MPU6050 + matriz + botones + buzzer
- */
-
 #ifndef F_CPU
 #define F_CPU 16000000UL
 #endif
@@ -40,10 +35,7 @@
 #define CANTIDAD_LEDS          64U
 #define TAMANO_MATRIZ          8U
 
-/*
- * Para el circuito físico se utiliza un brillo reducido.
- * Puede aumentarse con cuidado si la fuente soporta el consumo.
- */
+
 #define BRILLO                 40U
 
 #define ZONA_NIVELADA          30
@@ -62,10 +54,6 @@
 #define MARCA_CALIBRACION      0xA6U
 #define MUESTRAS_CALIBRACION   32U
 
-/*
- * Cambiar estos valores solamente si el MPU6050 queda montado
- * con una orientación diferente.
- */
 #define INTERCAMBIAR_EJES      0U
 #define INVERTIR_EJE_X         0U
 #define INVERTIR_EJE_Y         0U
@@ -132,9 +120,7 @@ static uint32_t fin_buzzer_ms = 0UL;
 
 static calibracion_t EEMEM calibracion_eeprom;
 
-/* =========================================================
-   TEMPORIZADOR DE 1 ms
-   ========================================================= */
+/*TEMPORIZADOR DE 1 ms */
 
 ISR(TIMER0_COMPA_vect)
 {
@@ -161,9 +147,7 @@ static uint32_t millis_read(void)
     return valor;
 }
 
-/* =========================================================
-   UART
-   ========================================================= */
+/* UART */
 
 static void uart_init(void)
 {
@@ -190,9 +174,7 @@ static void uart_send_text(const char *texto)
     }
 }
 
-/* =========================================================
-   I2C
-   ========================================================= */
+/* I2C */
 
 static void twi_init(void)
 {
@@ -310,9 +292,7 @@ static uint8_t i2c_write_pair(
     return 1U;
 }
 
-/* =========================================================
-   LCD 16x2 I2C
-   ========================================================= */
+/* LCD 16x2 I2C */
 
 static void lcd_command(uint8_t comando)
 {
@@ -402,9 +382,7 @@ static void lcd_write_line(
     memcpy(anterior, linea, 16U);
 }
 
-/* =========================================================
-   MPU6050
-   ========================================================= */
+/*MPU6050 */
 
 static uint8_t mpu_write_register(
     uint8_t registro,
@@ -530,9 +508,7 @@ static uint8_t mpu_init(void)
 
     _delay_ms(100);
 
-    /*
-     * Frecuencia de muestreo aproximada: 100 Hz.
-     */
+    /* Frecuencia de muestreo aproximada: 100 Hz */
     if (!mpu_write_register(
         MPU_REG_SMPLRT_DIV,
         0x09U)) {
@@ -540,9 +516,7 @@ static uint8_t mpu_init(void)
         return 0U;
     }
 
-    /*
-     * Filtro digital interno.
-     */
+    /*Filtro digital interno */
     if (!mpu_write_register(
         MPU_REG_CONFIG,
         0x03U)) {
@@ -550,9 +524,7 @@ static uint8_t mpu_init(void)
         return 0U;
     }
 
-    /*
-     * Giroscopio en +/-250 grados por segundo.
-     */
+    /*Giroscopio en +/-250 grados por segundo */
     if (!mpu_write_register(
         MPU_REG_GYRO_CONFIG,
         0x00U)) {
@@ -560,9 +532,7 @@ static uint8_t mpu_init(void)
         return 0U;
     }
 
-    /*
-     * Acelerómetro en +/-2 g.
-     */
+    /*Acelerómetro en +/-2 g */
     if (!mpu_write_register(
         MPU_REG_ACCEL_CONFIG,
         0x00U)) {
@@ -597,8 +567,8 @@ static uint32_t raiz_cuadrada_entera(uint32_t valor)
 }
 
 /*
- * Aproximación de atan2 que evita necesitar la biblioteca matemática.
- * El resultado se devuelve en décimas de grado.
+  Aproximación de atan2 que evita necesitar la biblioteca matemática.
+  El resultado se devuelve en décimas de grado.
  */
 static int16_t atan2_tenths(
     int32_t componente_y,
@@ -791,9 +761,7 @@ static uint8_t leer_angulos(void)
     return 1U;
 }
 
-/* =========================================================
-   EEPROM Y CALIBRACIÓN
-   ========================================================= */
+/*EEPROM Y CALIBRACIÓN */
 
 static void calibracion_cargar(void)
 {
@@ -888,9 +856,7 @@ static uint8_t calibrar_posicion_actual(uint32_t ahora)
     return 1U;
 }
 
-/* =========================================================
-   BOTONES
-   ========================================================= */
+/* BOTONES*/
 
 static void botones_init(void)
 {
@@ -932,9 +898,7 @@ static uint8_t boton_evento(
     return 0U;
 }
 
-/* =========================================================
-   BUZZER
-   ========================================================= */
+/* BUZZER */
 
 static void buzzer_init(void)
 {
@@ -979,9 +943,7 @@ static void buzzer_update(uint32_t ahora)
     }
 }
 
-/* =========================================================
-   MATRIZ WS2812
-   ========================================================= */
+/* MATRIZ WS2812 */
 
 static void ws2812_init(void)
 {
@@ -1247,9 +1209,7 @@ static void matriz_actualizar(uint32_t ahora)
     matriz_mostrar();
 }
 
-/* =========================================================
-   FORMATO DE ÁNGULOS
-   ========================================================= */
+/* FORMATO DE ÁNGULOS */
 
 static void format_angle(
     int16_t angulo,
@@ -1284,9 +1244,7 @@ static void format_angle(
     texto[5] = '\0';
 }
 
-/* =========================================================
-   LCD
-   ========================================================= */
+/* LCD */
 
 static void lcd_update(void)
 {
@@ -1325,9 +1283,7 @@ static void lcd_update(void)
     );
 }
 
-/* =========================================================
-   TERMINAL SERIAL
-   ========================================================= */
+/* TERMINAL SERIAL */
 
 static void terminal_update(void)
 {
@@ -1377,9 +1333,7 @@ static void terminal_update(void)
     uart_send_text("                    ");
 }
 
-/* =========================================================
-   PROGRAMA PRINCIPAL
-   ========================================================= */
+/* PROGRAMA PRINCIPAL */
 
 int main(void)
 {
