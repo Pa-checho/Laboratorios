@@ -1,170 +1,380 @@
 #define F_CPU 16000000UL
 
-#include <avr/io.h>
 #include <avr/eeprom.h>
-#include <util/delay.h>
+#include <avr/io.h>
+#include <avr/pgmspace.h>
 #include <stdint.h>
 #include <string.h>
+#include <util/delay.h>
+
+/*
+ * Laboratorio 4 - Problema A
+ * Cajero automatico con ATmega328P, RC522 y tarjetas MIFARE.
+ *
+ * El programa utiliza polling: no se habilitan interrupciones del
+ * ATmega328P. Los datos persistentes de cada cuenta se guardan en EEPROM.
+ */
+
+#define UART(texto) uart_flash(PSTR(texto))
+#define LCD(fila, texto) lcd_linea_flash((fila), PSTR(texto))
+#define LCD_VALOR(fila, titulo, valor) \
+    lcd_valor_flash((fila), PSTR(titulo), (valor))
+
+/* ==================== UART ==================== */
 
 #define BAUDIOS 9600UL
 #define UBRR_VALOR ((F_CPU / (16UL * BAUDIOS)) - 1UL)
-#define CANTIDAD_CUENTAS 3U
-#define VERSION_DATOS_EEPROM 0x4A45U
 
-#define LCD_RS        0x01U
-#define LCD_EN        0x04U
-#define LCD_LUZ       0x08U
-
-#define LED_VERDE PC1
-#define LED_ROJO  PC2
-#define BUZZER    PC3
-
-#define RC522_RST PB1
-#define RC522_SS  PB2
-#define SPI_MOSI  PB3
-#define SPI_MISO  PB4
-#define SPI_SCK   PB5
-
-#define RC522_COMMAND_REG     0x01U
-#define RC522_COM_IRQ_REG     0x04U
-#define RC522_DIV_IRQ_REG     0x05U
-#define RC522_ERROR_REG       0x06U
-#define RC522_FIFO_DATA_REG   0x09U
-#define RC522_FIFO_LEVEL_REG  0x0AU
-#define RC522_CONTROL_REG     0x0CU
-#define RC522_BIT_FRAMING_REG 0x0DU
-#define RC522_COLL_REG        0x0EU
-#define RC522_MODE_REG        0x11U
-#define RC522_TX_CONTROL_REG  0x14U
-#define RC522_TX_ASK_REG      0x15U
-#define RC522_CRC_RESULT_H    0x21U
-#define RC522_CRC_RESULT_L    0x22U
-#define RC522_T_MODE_REG      0x2AU
-#define RC522_T_PRESCALER_REG 0x2BU
-#define RC522_T_RELOAD_H_REG  0x2CU
-#define RC522_T_RELOAD_L_REG  0x2DU
-#define RC522_VERSION_REG     0x37U
-
-#define RC522_CMD_IDLE        0x00U
-#define RC522_CMD_CALC_CRC    0x03U
-#define RC522_CMD_TRANSCEIVE  0x0CU
-#define RC522_CMD_SOFT_RESET  0x0FU
-
-#define PICC_REQA             0x26U
-#define PICC_ANTICOLL_CL1     0x93U
-#define PICC_HALT             0x50U
-
-typedef struct {
-    uint8_t uid[4];
-    char pin[4];
-    int32_t saldo;
-} Cuenta;
-
-typedef enum {
-    ESPERAR_TARJETA,
-    INGRESAR_PIN,
-    MOSTRAR_MENU,
-    INGRESAR_RETIRO,
-    INGRESAR_DEPOSITO
-} Estado;
-
-static Cuenta EEMEM cuentas_eeprom[CANTIDAD_CUENTAS];
-static uint16_t EEMEM version_eeprom;
-
-static Cuenta cuentas[CANTIDAD_CUENTAS];
-static Estado estado;
-static int8_t cuenta_actual;
-static uint8_t intentos_pin;
-static char pin_ingresado[4];
-static uint8_t largo_pin;
-static uint32_t monto_ingresado;
-static uint8_t digitos_monto;
-static uint8_t lcd_activo;
-static uint8_t lcd_direccion;
-
-static void uart_iniciar(void)
+void uart_iniciar(void)
 {
+    /* UART a 9600 baudios, formato 8N1 y solo transmision.
+       No se habilita RX ni la interrupcion de transmision. */
     UBRR0H = (uint8_t)(UBRR_VALOR >> 8);
     UBRR0L = (uint8_t)UBRR_VALOR;
-    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0B = (1 << TXEN0);
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
 }
 
-static void uart_caracter(char dato)
+void uart_caracter(char dato)
 {
+    /* Polling: espera que el registro de transmision quede libre.
+       UDRE0 es un flag consultado por software, no una interrupcion. */
     while (!(UCSR0A & (1 << UDRE0))) {
     }
-    UDR0 = (uint8_t)dato;
+    UDR0 = dato;
 }
 
-static void uart_texto(const char *texto)
+void uart_texto(const char *texto)
 {
+    /* Envia una cadena almacenada en SRAM hasta encontrar '\0'. */
     while (*texto != '\0') {
         uart_caracter(*texto++);
     }
 }
 
-static void uart_hex(uint8_t valor)
+void uart_flash(PGM_P texto)
 {
-    static const char digitos[] = "0123456789ABCDEF";
-    uart_caracter(digitos[valor >> 4]);
-    uart_caracter(digitos[valor & 0x0FU]);
+    /* Envia un texto guardado en Flash mediante PSTR/PROGMEM. */
+    char dato;
+
+    while ((dato = (char)pgm_read_byte(texto++)) != '\0') {
+        uart_caracter(dato);
+    }
 }
 
-static void uart_uid(const uint8_t uid[4])
+void uart_hex(uint8_t valor)
 {
-    uint8_t i;
+    /* Convierte un byte en dos caracteres hexadecimales para diagnostico. */
+    static const char digitos[] PROGMEM = "0123456789ABCDEF";
 
-    uart_texto("UID detectado: ");
-    for (i = 0; i < 4; i++) {
-        uart_hex(uid[i]);
-        if (i < 3) {
-            uart_caracter(' ');
-        }
-    }
-    uart_texto("\r\n");
+    uart_caracter((char)pgm_read_byte(&digitos[valor >> 4]));
+    uart_caracter((char)pgm_read_byte(&digitos[valor & 0x0FU]));
 }
 
-static void numero_texto(uint32_t numero, char *texto)
+void uart_numero(uint32_t numero)
 {
-    char invertido[11];
-    uint8_t cantidad = 0;
-    uint8_t i;
+    /* Convierte un entero decimal a texto sin usar printf. */
+    char texto[11];
+    uint8_t posicion = sizeof(texto) - 1U;
 
-    if (numero == 0) {
-        texto[0] = '0';
-        texto[1] = '\0';
-        return;
-    }
-
-    while (numero > 0 && cantidad < sizeof(invertido)) {
-        invertido[cantidad++] = (char)('0' + (numero % 10U));
+    texto[posicion] = '\0';
+    do {
+        texto[--posicion] = (char)('0' + numero % 10U);
         numero /= 10U;
+    } while (numero != 0);
+    uart_texto(&texto[posicion]);
+}
+
+/* ==================== SPI ==================== */
+
+void spi_iniciar(void)
+{
+    /* D10 debe ser salida para conservar al ATmega328P como maestro SPI. */
+    DDRB |= (1 << PB2) | (1 << PB3) | (1 << PB5);
+    DDRB &= (uint8_t)~(1 << PB4);
+    PORTB |= (1 << PB2);
+
+    /* Modo 0, MSB primero y reloj lento de 125 kHz para diagnostico.
+       No se habilita SPIE: la transferencia se atiende por polling. */
+    SPCR = (1 << SPE) | (1 << MSTR) |
+           (1 << SPR1) | (1 << SPR0);
+    SPSR = 0;
+}
+
+uint8_t spi_transferir(uint8_t dato)
+{
+    /* SPI es full duplex: al escribir un byte tambien se recibe uno.
+       Se consulta SPIF hasta que termina; no existe una ISR de SPI. */
+    SPDR = dato;
+    while (!(SPSR & (1 << SPIF))) {
     }
+    return SPDR;
+}
+
+/* ==================== LECTOR RC522 ==================== */
+
+#define RC522_RST PB1
+#define RC522_SS  PB2
+
+#define COMMAND_REG     0x01U
+#define COM_IRQ_REG     0x04U
+#define DIV_IRQ_REG     0x05U
+#define ERROR_REG       0x06U
+#define FIFO_DATA_REG   0x09U
+#define FIFO_LEVEL_REG  0x0AU
+#define BIT_FRAMING_REG 0x0DU
+#define COLL_REG        0x0EU
+#define MODE_REG        0x11U
+#define TX_CONTROL_REG  0x14U
+#define TX_ASK_REG      0x15U
+#define CRC_RESULT_H    0x21U
+#define CRC_RESULT_L    0x22U
+#define T_MODE_REG      0x2AU
+#define T_PRESCALER_REG 0x2BU
+#define T_RELOAD_H_REG  0x2CU
+#define T_RELOAD_L_REG  0x2DU
+#define VERSION_REG     0x37U
+
+#define CMD_IDLE       0x00U
+#define CMD_CALC_CRC   0x03U
+#define CMD_TRANSCEIVE 0x0CU
+#define CMD_SOFT_RESET 0x0FU
+
+#define PICC_REQA     0x26U
+#define PICC_CL1      0x93U
+#define PICC_HALT     0x50U
+
+static void escribir(uint8_t registro, uint8_t valor)
+{
+    /* Baja SS, envia direccion de escritura y dato, y vuelve a subir SS. */
+    PORTB &= (uint8_t)~(1 << RC522_SS);
+    spi_transferir((uint8_t)((registro << 1) & 0x7EU));
+    spi_transferir(valor);
+    PORTB |= (1 << RC522_SS);
+}
+
+static uint8_t leer(uint8_t registro)
+{
+    /* Lee un registro interno del MFRC522 mediante SPI. */
+    uint8_t valor;
+
+    PORTB &= (uint8_t)~(1 << RC522_SS);
+    spi_transferir((uint8_t)(((registro << 1) & 0x7EU) | 0x80U));
+    valor = spi_transferir(0);
+    PORTB |= (1 << RC522_SS);
+    return valor;
+}
+
+static void activar_bits(uint8_t registro, uint8_t mascara)
+{
+    /* Activa solo los bits indicados sin modificar los restantes. */
+    escribir(registro, (uint8_t)(leer(registro) | mascara));
+}
+
+static void desactivar_bits(uint8_t registro, uint8_t mascara)
+{
+    /* Desactiva solo los bits indicados sin modificar los restantes. */
+    escribir(registro, (uint8_t)(leer(registro) & (uint8_t)~mascara));
+}
+
+static uint8_t calcular_crc(const uint8_t *datos, uint8_t cantidad,
+                            uint8_t resultado[2])
+{
+    /* Usa el coprocesador CRC interno del RC522. Se consulta DivIrqReg
+       mediante polling hasta obtener el resultado o agotar el limite. */
+    uint16_t espera = 5000;
+    uint8_t i;
+
+    escribir(COMMAND_REG, CMD_IDLE);
+    escribir(DIV_IRQ_REG, 0x04U);
+    activar_bits(FIFO_LEVEL_REG, 0x80U);
 
     for (i = 0; i < cantidad; i++) {
-        texto[i] = invertido[cantidad - 1U - i];
+        escribir(FIFO_DATA_REG, datos[i]);
     }
-    texto[cantidad] = '\0';
+
+    escribir(COMMAND_REG, CMD_CALC_CRC);
+    while (espera-- > 0) {
+        if (leer(DIV_IRQ_REG) & 0x04U) {
+            resultado[0] = leer(CRC_RESULT_L);
+            resultado[1] = leer(CRC_RESULT_H);
+            escribir(COMMAND_REG, CMD_IDLE);
+            return 1;
+        }
+    }
+    escribir(COMMAND_REG, CMD_IDLE);
+    return 0;
 }
 
-static void uart_numero(uint32_t numero)
+static uint8_t transmitir(const uint8_t *envio, uint8_t largo_envio,
+                          uint8_t *respuesta, uint8_t *largo_respuesta)
 {
-    char texto[12];
-    numero_texto(numero, texto);
-    uart_texto(texto);
+    uint16_t espera = 3000;
+    /* Esta variable contiene ComIrqReg del RC522. Su nombre no significa
+       que el ATmega atienda una interrupcion: el registro se consulta. */
+    uint8_t interrupcion;
+    uint8_t capacidad = largo_respuesta != 0 ? *largo_respuesta : 0;
+    uint8_t cantidad;
+    uint8_t i;
+
+    escribir(COMMAND_REG, CMD_IDLE);
+    escribir(COM_IRQ_REG, 0x7FU);
+    activar_bits(FIFO_LEVEL_REG, 0x80U);
+    for (i = 0; i < largo_envio; i++) {
+        escribir(FIFO_DATA_REG, envio[i]);
+    }
+
+    escribir(COMMAND_REG, CMD_TRANSCEIVE);
+    activar_bits(BIT_FRAMING_REG, 0x80U);
+    do {
+        interrupcion = leer(COM_IRQ_REG);
+        if (interrupcion & 0x30U) {
+            break;
+        }
+        if (interrupcion & 0x01U) {
+            desactivar_bits(BIT_FRAMING_REG, 0x80U);
+            return 0;
+        }
+    } while (--espera > 0);
+
+    desactivar_bits(BIT_FRAMING_REG, 0x80U);
+    if (espera == 0 || (leer(ERROR_REG) & 0x13U)) {
+        return 0;
+    }
+
+    if (respuesta != 0 && largo_respuesta != 0) {
+        cantidad = leer(FIFO_LEVEL_REG);
+        if (cantidad > capacidad) {
+            cantidad = capacidad;
+        }
+        for (i = 0; i < cantidad; i++) {
+            respuesta[i] = leer(FIFO_DATA_REG);
+        }
+        *largo_respuesta = cantidad;
+    }
+    return 1;
 }
 
-static void twi_iniciar(void)
+static uint8_t solicitar(void)
 {
-    TWSR = 0;
-    TWBR = 152;
-    TWCR = (1 << TWEN);
-    PORTC |= (1 << PC4) | (1 << PC5);
+    /* Envia REQA para detectar una tarjeta ISO/IEC 14443A cercana. */
+    uint8_t comando = PICC_REQA;
+    uint8_t respuesta[2];
+    uint8_t largo = sizeof(respuesta);
+    uint8_t correcto;
+
+    /* REQA utiliza una trama corta de siete bits. */
+    escribir(BIT_FRAMING_REG, 0x07U);
+    correcto = transmitir(&comando, 1, respuesta, &largo);
+    escribir(BIT_FRAMING_REG, 0);
+    return correcto && largo == 2;
 }
+
+static uint8_t anticolision(uint8_t uid_bcc[5])
+{
+    /* Obtiene UID de cuatro bytes y verifica el byte de control BCC. */
+    uint8_t comando[2] = {PICC_CL1, 0x20U};
+    uint8_t largo = 5;
+
+    escribir(BIT_FRAMING_REG, 0);
+    desactivar_bits(COLL_REG, 0x80U);
+    if (!transmitir(comando, 2, uid_bcc, &largo) || largo != 5) {
+        return 0;
+    }
+    return (uint8_t)(uid_bcc[0] ^ uid_bcc[1] ^ uid_bcc[2] ^ uid_bcc[3])
+           == uid_bcc[4];
+}
+
+static uint8_t seleccionar(const uint8_t uid_bcc[5])
+{
+    /* Selecciona la tarjeta detectada y comprueba la respuesta del lector. */
+    uint8_t trama[9];
+    uint8_t respuesta[3];
+    uint8_t largo = sizeof(respuesta);
+    uint8_t i;
+
+    trama[0] = PICC_CL1;
+    trama[1] = 0x70U;
+    for (i = 0; i < 5; i++) {
+        trama[2U + i] = uid_bcc[i];
+    }
+    if (!calcular_crc(trama, 7, &trama[7])) {
+        return 0;
+    }
+    return transmitir(trama, sizeof(trama), respuesta, &largo) && largo == 3;
+}
+
+static void detener_tarjeta(void)
+{
+    /* Envia PICC_HALT para finalizar la comunicacion con la tarjeta actual. */
+    uint8_t trama[4] = {PICC_HALT, 0, 0, 0};
+
+    if (calcular_crc(trama, 2, &trama[2])) {
+        transmitir(trama, sizeof(trama), 0, 0);
+    }
+}
+
+uint8_t rc522_iniciar(void)
+{
+    /* Reinicia y configura el RC522. El pin IRQ del modulo no se utiliza;
+       la presencia de tarjeta se comprueba periodicamente desde main. */
+    uint16_t espera = 1000;
+
+    spi_iniciar();
+    DDRB |= (1 << RC522_RST);
+    PORTB &= (uint8_t)~(1 << RC522_RST);
+    _delay_ms(5);
+    PORTB |= (1 << RC522_RST);
+    _delay_ms(50);
+
+    escribir(COMMAND_REG, CMD_SOFT_RESET);
+    do {
+        _delay_ms(1);
+        if (!(leer(COMMAND_REG) & 0x10U)) {
+            break;
+        }
+    } while (--espera > 0);
+
+    /* Parámetros recomendados para tarjetas ISO/IEC 14443A a 106 kbps. */
+    escribir(T_MODE_REG, 0x8DU);
+    escribir(T_PRESCALER_REG, 0x3EU);
+    escribir(T_RELOAD_L_REG, 30U);
+    escribir(T_RELOAD_H_REG, 0);
+    escribir(TX_ASK_REG, 0x40U);
+    escribir(MODE_REG, 0x3DU);
+    activar_bits(TX_CONTROL_REG, 0x03U);
+    return leer(VERSION_REG);
+}
+
+uint8_t rc522_leer_uid(uint8_t uid[4])
+{
+    /* Secuencia completa: REQA, anticolision, seleccion y HALT. */
+    uint8_t uid_bcc[5];
+    uint8_t i;
+
+    if (!solicitar() || !anticolision(uid_bcc) || !seleccionar(uid_bcc)) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        uid[i] = uid_bcc[i];
+    }
+    detener_tarjeta();
+    return 1;
+}
+
+/* ==================== LCD I2C ==================== */
+
+#define LCD_RS  0x01U
+#define LCD_EN  0x04U
+#define LCD_LUZ 0x08U
+
+static uint8_t activa;
+static uint8_t direccion_actual;
 
 static uint8_t twi_esperar(void)
 {
+    /* Espera por polling a que TWINT indique fin de una operacion I2C.
+       TWIE no esta habilitado, por lo tanto no se genera una ISR de TWI. */
     uint16_t limite = 60000;
 
     while (!(TWCR & (1 << TWINT))) {
@@ -177,20 +387,21 @@ static uint8_t twi_esperar(void)
 
 static void twi_detener(void)
 {
+    /* Genera la condicion STOP del bus I2C. */
     TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
 }
 
 static uint8_t twi_comenzar(uint8_t direccion)
 {
-    uint8_t resultado;
+    /* Genera START y envia la direccion I2C en modo escritura. */
+    uint8_t estado;
 
     TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
     if (!twi_esperar()) {
         return 0;
     }
-
-    resultado = TWSR & 0xF8U;
-    if (resultado != 0x08U && resultado != 0x10U) {
+    estado = TWSR & 0xF8U;
+    if (estado != 0x08U && estado != 0x10U) {
         twi_detener();
         return 0;
     }
@@ -206,191 +417,177 @@ static uint8_t twi_comenzar(uint8_t direccion)
 
 static uint8_t twi_enviar(uint8_t dato)
 {
+    /* Envia un byte y verifica que el esclavo responda con ACK. */
     TWDR = dato;
     TWCR = (1 << TWINT) | (1 << TWEN);
     return twi_esperar() && (TWSR & 0xF8U) == 0x28U;
 }
 
-static uint8_t lcd_expansor(uint8_t dato)
+static uint8_t expansor(uint8_t dato)
 {
+    /* Envia un byte al expansor PCF8574 conectado a la LCD. */
     uint8_t correcto;
 
-    if (!twi_comenzar(lcd_direccion)) {
+    if (!twi_comenzar(direccion_actual)) {
         return 0;
     }
-
     correcto = twi_enviar((uint8_t)(dato | LCD_LUZ));
     twi_detener();
     return correcto;
 }
 
-static void lcd_nibble(uint8_t nibble, uint8_t control)
+static void nibble(uint8_t dato, uint8_t control)
 {
-    uint8_t dato = (uint8_t)((nibble & 0xF0U) | control);
-
-    lcd_expansor((uint8_t)(dato | LCD_EN));
+    /* Transfiere cuatro bits y genera el pulso Enable de la LCD. */
+    dato = (uint8_t)((dato & 0xF0U) | control);
+    expansor((uint8_t)(dato | LCD_EN));
     _delay_us(1);
-    lcd_expansor((uint8_t)(dato & (uint8_t)~LCD_EN));
+    expansor((uint8_t)(dato & (uint8_t)~LCD_EN));
     _delay_us(50);
 }
 
-static void lcd_enviar(uint8_t control, uint8_t dato)
+static void enviar(uint8_t control, uint8_t dato)
 {
-    if (!lcd_activo) {
+    /* Divide cada byte en nibble alto y nibble bajo. */
+    if (!activa) {
         return;
     }
-
-    lcd_nibble(dato, control);
-    lcd_nibble((uint8_t)(dato << 4), control);
+    nibble(dato, control);
+    nibble((uint8_t)(dato << 4), control);
 }
 
-static void lcd_comando(uint8_t comando)
+static void comando(uint8_t dato)
 {
-    lcd_enviar(0, comando);
-    if (comando == 0x01U || comando == 0x02U) {
+    /* Envia una instruccion al controlador HD44780. */
+    enviar(0, dato);
+    if (dato == 0x01U || dato == 0x02U) {
         _delay_ms(2);
-    } else {
-        _delay_us(50);
     }
 }
 
-static void lcd_dato(char dato)
+static void caracter(char dato)
 {
-    lcd_enviar(LCD_RS, (uint8_t)dato);
-    _delay_us(50);
+    /* Envia un caracter visible a la LCD. */
+    enviar(LCD_RS, (uint8_t)dato);
 }
 
-static void lcd_iniciar(void)
+uint8_t lcd_iniciar(void)
 {
-    static const uint8_t direcciones[] = {0x27U, 0x3FU};
-    uint8_t i;
+    uint8_t direccion;
 
-    lcd_activo = 0;
-    for (i = 0; i < sizeof(direcciones); i++) {
-        if (twi_comenzar(direcciones[i])) {
+    /* TWI a 100 kHz, sin aritmetica de punto flotante.
+       El bus se maneja por polling, no por interrupciones. */
+    TWSR = 0;
+    TWBR = (uint8_t)((F_CPU / 100000UL - 16UL) / 2UL);
+    TWCR = (1 << TWEN);
+    PORTC |= (1 << PC4) | (1 << PC5);
+
+    /* Busca automaticamente cualquier dispositivo I2C valido. En este
+       montaje el unico dispositivo del bus es el adaptador de la LCD. */
+    activa = 0;
+    for (direccion = 0x08U; direccion <= 0x77U; direccion++) {
+        if (twi_comenzar(direccion)) {
             twi_detener();
-            lcd_direccion = direcciones[i];
-            lcd_activo = 1;
+            direccion_actual = direccion;
+            activa = 1;
             break;
         }
     }
-    if (!lcd_activo) {
-        return;
+    if (!activa) {
+        return 0;
     }
 
+    /* Secuencia de arranque de la LCD HD44780 en modo de cuatro bits. */
     _delay_ms(50);
-    lcd_nibble(0x30U, 0);
+    nibble(0x30U, 0);
     _delay_ms(5);
-    lcd_nibble(0x30U, 0);
+    nibble(0x30U, 0);
     _delay_us(150);
-    lcd_nibble(0x30U, 0);
-    lcd_nibble(0x20U, 0);
-    lcd_comando(0x28U);
-    lcd_comando(0x0CU);
-    lcd_comando(0x06U);
-    lcd_comando(0x01U);
+    nibble(0x30U, 0);
+    nibble(0x20U, 0);
+    comando(0x28U);
+    comando(0x0CU);
+    comando(0x06U);
+    comando(0x01U);
+    return 1;
 }
 
-static void lcd_linea(uint8_t fila, const char *texto)
+uint8_t lcd_direccion(void)
 {
+    /* Devuelve la direccion I2C encontrada durante el escaneo. */
+    return direccion_actual;
+}
+
+void lcd_linea(uint8_t fila, const char *texto)
+{
+    /* Escribe exactamente 16 posiciones y completa con espacios. */
     uint8_t posicion;
 
-    if (!lcd_activo) {
+    if (!activa) {
         return;
     }
-
-    lcd_comando(fila == 0 ? 0x80U : 0xC0U);
+    comando(fila == 0 ? 0x80U : 0xC0U);
     for (posicion = 0; posicion < 16; posicion++) {
-        if (*texto != '\0') {
-            lcd_dato(*texto++);
-        } else {
-            lcd_dato(' ');
-        }
+        caracter(*texto != '\0' ? *texto++ : ' ');
     }
 }
 
-static void lcd_numero(const char *titulo, uint32_t numero)
+void lcd_linea_flash(uint8_t fila, PGM_P texto)
 {
+    /* Copia una linea desde Flash y luego la muestra en la LCD. */
     char linea[17];
-    char valor[12];
     uint8_t posicion = 0;
-    uint8_t i = 0;
+    char dato;
 
-    while (posicion < 16 && titulo[i] != '\0') {
-        linea[posicion++] = titulo[i++];
+    while (posicion < 16 &&
+           (dato = (char)pgm_read_byte(texto++)) != '\0') {
+        linea[posicion++] = dato;
     }
-    numero_texto(numero, valor);
-    i = 0;
-    while (posicion < 16 && valor[i] != '\0') {
-        linea[posicion++] = valor[i++];
+    linea[posicion] = '\0';
+    lcd_linea(fila, linea);
+}
+
+void lcd_valor_flash(uint8_t fila, PGM_P titulo, uint32_t valor)
+{
+    /* Forma una linea con titulo y numero sin usar sprintf. */
+    char linea[17];
+    char numero[11];
+    uint8_t posicion = 0;
+    uint8_t inicio = sizeof(numero);
+    char dato;
+
+    while (posicion < 16 &&
+           (dato = (char)pgm_read_byte(titulo++)) != '\0') {
+        linea[posicion++] = dato;
     }
-    while (posicion < 16) {
-        linea[posicion++] = ' ';
+    do {
+        numero[--inicio] = (char)('0' + valor % 10U);
+        valor /= 10U;
+    } while (valor != 0);
+    while (posicion < 16 && inicio < sizeof(numero)) {
+        linea[posicion++] = numero[inicio++];
     }
-    linea[16] = '\0';
-    lcd_linea(1, linea);
+    linea[posicion] = '\0';
+    lcd_linea(fila, linea);
 }
 
-static void salidas_iniciar(void)
+/* ==================== TECLADO ==================== */
+
+static uint8_t columna_presionada(void)
 {
-    DDRC |= (1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER);
-    PORTC &= (uint8_t)~((1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER));
+    /* Las columnas tienen pull-up: una columna en cero indica pulsacion. */
+    if (!(PIND & (1 << PD6))) return 0;
+    if (!(PIND & (1 << PD7))) return 1;
+    if (!(PINB & (1 << PB0))) return 2;
+    if (!(PINC & (1 << PC0))) return 3;
+    return 0xFFU;
 }
 
-static void tono_correcto(void)
+void teclado_iniciar(void)
 {
-    uint16_t i;
-
-    for (i = 0; i < 400; i++) {
-        PORTC ^= (1 << BUZZER);
-        _delay_us(250);
-    }
-    PORTC &= (uint8_t)~(1 << BUZZER);
-}
-
-static void tono_error(void)
-{
-    uint16_t i;
-
-    for (i = 0; i < 300; i++) {
-        PORTC ^= (1 << BUZZER);
-        _delay_us(1000);
-    }
-    PORTC &= (uint8_t)~(1 << BUZZER);
-}
-
-static void indicar_exito(void)
-{
-    PORTC |= (1 << LED_VERDE);
-    tono_correcto();
-    _delay_ms(250);
-    PORTC &= (uint8_t)~(1 << LED_VERDE);
-}
-
-static void indicar_error(void)
-{
-    PORTC |= (1 << LED_ROJO);
-    tono_error();
-    PORTC &= (uint8_t)~(1 << LED_ROJO);
-}
-
-static void alarma_intentos(void)
-{
-    uint8_t i;
-
-    PORTC |= (1 << LED_ROJO);
-    for (i = 0; i < 3; i++) {
-        tono_error();
-        _delay_ms(120);
-    }
-    PORTC &= (uint8_t)~(1 << LED_ROJO);
-}
-
-static void teclado_iniciar(void)
-{
+    /* Filas D2-D5 como salidas y columnas D6, D7, D8 y A0 con pull-up. */
     DDRD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
     PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
-
     DDRD &= (uint8_t)~((1 << PD6) | (1 << PD7));
     PORTD |= (1 << PD6) | (1 << PD7);
     DDRB &= (uint8_t)~(1 << PB0);
@@ -399,17 +596,10 @@ static void teclado_iniciar(void)
     PORTC |= (1 << PC0);
 }
 
-static uint8_t columna_presionada(void)
+char teclado_leer(void)
 {
-    if (!(PIND & (1 << PD6))) return 0;
-    if (!(PIND & (1 << PD7))) return 1;
-    if (!(PINB & (1 << PB0))) return 2;
-    if (!(PINC & (1 << PC0))) return 3;
-    return 0xFFU;
-}
-
-static char teclado_leer(void)
-{
+    /* Escaneo matricial por polling. No se usan interrupciones de pin.
+       Se activa una fila por vez y se observan las cuatro columnas. */
     static const char teclas[4][4] = {
         {'1', '2', '3', 'A'},
         {'4', '5', '6', 'B'},
@@ -423,272 +613,174 @@ static char teclado_leer(void)
         PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
         PORTD &= (uint8_t)~(1 << (PD2 + fila));
         _delay_us(10);
-
         columna = columna_presionada();
         if (columna != 0xFFU) {
+            /* Retardo de antirrebote del contacto mecanico. */
             _delay_ms(25);
             if (columna_presionada() == columna) {
+                /* Espera bloqueante hasta que el usuario suelte la tecla. */
                 while (columna_presionada() != 0xFFU) {
                 }
-                PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
-                return teclas[fila][columna];
+                PORTD |= (1 << PD2) | (1 << PD3) |
+                         (1 << PD4) | (1 << PD5);
+                /* El conector del teclado fisico esta cableado en orden
+                   inverso: se intercambian filas/columnas y ambos indices. */
+                return teclas[3U - columna][3U - fila];
             }
         }
     }
-
     PORTD |= (1 << PD2) | (1 << PD3) | (1 << PD4) | (1 << PD5);
     return '\0';
 }
 
-static uint8_t spi_transferir(uint8_t dato)
+/* ==================== LED Y BUZZER ==================== */
+
+#define LED_VERDE PC1
+#define LED_ROJO  PC2
+#define BUZZER    PC3
+
+static void tono(uint16_t ciclos, uint16_t demora_us)
 {
-    SPDR = dato;
-    while (!(SPSR & (1 << SPIF))) {
+    /* Genera una onda cuadrada cambiando el pin por software.
+       No utiliza Timer, PWM ni interrupciones; mientras suena, bloquea. */
+    while (ciclos-- > 0) {
+        PORTC ^= (1 << BUZZER);
+        if (demora_us == 250U) {
+            _delay_us(250);
+        } else {
+            _delay_us(1000);
+        }
     }
-    return SPDR;
+    PORTC &= (uint8_t)~(1 << BUZZER);
 }
 
-static void spi_iniciar(void)
+void salidas_iniciar(void)
 {
-    DDRB |= (1 << RC522_RST) | (1 << RC522_SS) | (1 << SPI_MOSI) | (1 << SPI_SCK);
-    DDRB &= (uint8_t)~(1 << SPI_MISO);
-    PORTB |= (1 << RC522_SS) | (1 << RC522_RST);
-    SPCR = (1 << SPE) | (1 << MSTR) | (1 << SPR0);
-    SPSR = 0;
+    /* Configura LED verde, LED rojo y buzzer como salidas digitales. */
+    DDRC |= (1 << LED_VERDE) | (1 << LED_ROJO) | (1 << BUZZER);
+    PORTC &= (uint8_t)~((1 << LED_VERDE) | (1 << LED_ROJO) |
+                       (1 << BUZZER));
 }
 
-static void rc522_escribir(uint8_t registro, uint8_t valor)
+void indicar_exito(void)
 {
-    PORTB &= (uint8_t)~(1 << RC522_SS);
-    spi_transferir((uint8_t)((registro << 1) & 0x7EU));
-    spi_transferir(valor);
-    PORTB |= (1 << RC522_SS);
+    /* Señal visual y sonora para una operacion correcta. */
+    PORTC |= (1 << LED_VERDE);
+    tono(400, 250);
+    _delay_ms(250);
+    PORTC &= (uint8_t)~(1 << LED_VERDE);
 }
 
-static uint8_t rc522_leer(uint8_t registro)
+void indicar_error(void)
 {
-    uint8_t valor;
-
-    PORTB &= (uint8_t)~(1 << RC522_SS);
-    spi_transferir((uint8_t)(((registro << 1) & 0x7EU) | 0x80U));
-    valor = spi_transferir(0);
-    PORTB |= (1 << RC522_SS);
-    return valor;
+    /* Señal visual y sonora para una operacion incorrecta. */
+    PORTC |= (1 << LED_ROJO);
+    tono(300, 1000);
+    PORTC &= (uint8_t)~(1 << LED_ROJO);
 }
 
-static void rc522_activar_bits(uint8_t registro, uint8_t mascara)
+void alarma_intentos(void)
 {
-    rc522_escribir(registro, (uint8_t)(rc522_leer(registro) | mascara));
-}
-
-static void rc522_desactivar_bits(uint8_t registro, uint8_t mascara)
-{
-    rc522_escribir(registro, (uint8_t)(rc522_leer(registro) & (uint8_t)~mascara));
-}
-
-static uint8_t rc522_calcular_crc(const uint8_t *datos, uint8_t cantidad, uint8_t resultado[2])
-{
-    uint16_t espera = 5000;
+    /* Alarma de tres tonos luego de tres intentos de PIN fallidos. */
     uint8_t i;
 
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_IDLE);
-    rc522_escribir(RC522_DIV_IRQ_REG, 0x04U);
-    rc522_activar_bits(RC522_FIFO_LEVEL_REG, 0x80U);
-
-    for (i = 0; i < cantidad; i++) {
-        rc522_escribir(RC522_FIFO_DATA_REG, datos[i]);
+    PORTC |= (1 << LED_ROJO);
+    for (i = 0; i < 3; i++) {
+        tono(300, 1000);
+        _delay_ms(120);
     }
-
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_CALC_CRC);
-    while (espera-- > 0) {
-        if (rc522_leer(RC522_DIV_IRQ_REG) & 0x04U) {
-            resultado[0] = rc522_leer(RC522_CRC_RESULT_L);
-            resultado[1] = rc522_leer(RC522_CRC_RESULT_H);
-            rc522_escribir(RC522_COMMAND_REG, RC522_CMD_IDLE);
-            return 1;
-        }
-    }
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_IDLE);
-    return 0;
+    PORTC &= (uint8_t)~(1 << LED_ROJO);
 }
 
-static uint8_t rc522_transmitir(const uint8_t *envio, uint8_t largo_envio,
-                                uint8_t *respuesta, uint8_t *largo_respuesta)
+/* ==================== LOGICA DEL CAJERO ==================== */
+
+#define CANTIDAD_CUENTAS 3U
+#define VERSION_EEPROM   0x4A46U
+
+typedef struct {
+    /* Datos asociados a cada tarjeta registrada. */
+    uint8_t uid[4];
+    char pin[4];
+    int32_t saldo;
+} Cuenta;
+
+typedef enum {
+    /* La variable estado define como se interpreta cada entrada. */
+    ESPERAR_TARJETA,
+    INGRESAR_PIN,
+    MOSTRAR_MENU,
+    INGRESAR_RETIRO,
+    INGRESAR_DEPOSITO,
+    INGRESAR_NUEVO_PIN,
+    CONFIRMAR_NUEVO_PIN
+} Estado;
+
+/* Datos iniciales de prueba. Los UID se reemplazan por los de las tarjetas reales. */
+static const Cuenta cuentas_iniciales[CANTIDAD_CUENTAS] PROGMEM = {
+    {{0xC3, 0x50, 0xB9, 0x14}, {'1', '2', '3', '4'}, 15000},
+    {{0x0C, 0xAD, 0x38, 0x4A}, {'1', '2', '3', '4'}, 8000},
+    {{0xDE, 0xAD, 0xBE, 0xEF}, {'1', '2', '3', '4'}, 25000}
+};
+
+static Cuenta EEMEM cuentas_eeprom[CANTIDAD_CUENTAS];
+static uint16_t EEMEM version_eeprom;
+
+static Cuenta cuentas[CANTIDAD_CUENTAS];
+static Estado estado;
+static int8_t cuenta_actual;
+static uint8_t intentos_pin;
+static char pin_ingresado[4];
+static char nuevo_pin[4];
+static uint8_t largo_pin;
+static uint32_t monto;
+static uint8_t digitos_monto;
+static uint8_t lector_disponible;
+
+static void imprimir_uid(const uint8_t uid[4])
 {
-    uint16_t espera = 3000;
-    uint8_t interrupcion;
-    uint8_t cantidad;
-    uint8_t capacidad = largo_respuesta != 0 ? *largo_respuesta : 0;
+    /* Presenta los cuatro bytes del UID por UART en hexadecimal. */
     uint8_t i;
 
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_IDLE);
-    rc522_escribir(RC522_COM_IRQ_REG, 0x7FU);
-    rc522_activar_bits(RC522_FIFO_LEVEL_REG, 0x80U);
-
-    for (i = 0; i < largo_envio; i++) {
-        rc522_escribir(RC522_FIFO_DATA_REG, envio[i]);
-    }
-
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_TRANSCEIVE);
-    rc522_activar_bits(RC522_BIT_FRAMING_REG, 0x80U);
-
-    do {
-        interrupcion = rc522_leer(RC522_COM_IRQ_REG);
-        if (interrupcion & 0x30U) {
-            break;
-        }
-        if (interrupcion & 0x01U) {
-            rc522_desactivar_bits(RC522_BIT_FRAMING_REG, 0x80U);
-            return 0;
-        }
-    } while (--espera > 0);
-
-    rc522_desactivar_bits(RC522_BIT_FRAMING_REG, 0x80U);
-    if (espera == 0 || (rc522_leer(RC522_ERROR_REG) & 0x13U)) {
-        return 0;
-    }
-
-    if (respuesta != 0 && largo_respuesta != 0) {
-        cantidad = rc522_leer(RC522_FIFO_LEVEL_REG);
-        if (cantidad > capacidad) {
-            cantidad = capacidad;
-        }
-        for (i = 0; i < cantidad; i++) {
-            respuesta[i] = rc522_leer(RC522_FIFO_DATA_REG);
-        }
-        *largo_respuesta = cantidad;
-    }
-    return 1;
-}
-
-static uint8_t rc522_solicitar(void)
-{
-    uint8_t comando = PICC_REQA;
-    uint8_t respuesta[2];
-    uint8_t largo = sizeof(respuesta);
-    uint8_t correcto;
-
-    rc522_escribir(RC522_BIT_FRAMING_REG, 0x07U);
-    correcto = rc522_transmitir(&comando, 1, respuesta, &largo);
-    rc522_escribir(RC522_BIT_FRAMING_REG, 0x00U);
-    return correcto && largo == 2;
-}
-
-static uint8_t rc522_anticolision(uint8_t uid_bcc[5])
-{
-    uint8_t comando[2] = {PICC_ANTICOLL_CL1, 0x20U};
-    uint8_t largo = 5;
-
-    rc522_escribir(RC522_BIT_FRAMING_REG, 0x00U);
-    rc522_desactivar_bits(RC522_COLL_REG, 0x80U);
-    if (!rc522_transmitir(comando, 2, uid_bcc, &largo) || largo != 5) {
-        return 0;
-    }
-    return (uint8_t)(uid_bcc[0] ^ uid_bcc[1] ^ uid_bcc[2] ^ uid_bcc[3]) == uid_bcc[4];
-}
-
-static uint8_t rc522_seleccionar(const uint8_t uid_bcc[5])
-{
-    uint8_t trama[9];
-    uint8_t respuesta[3];
-    uint8_t largo = sizeof(respuesta);
-    uint8_t i;
-
-    trama[0] = PICC_ANTICOLL_CL1;
-    trama[1] = 0x70U;
-    for (i = 0; i < 5; i++) {
-        trama[2U + i] = uid_bcc[i];
-    }
-    if (!rc522_calcular_crc(trama, 7, &trama[7])) {
-        return 0;
-    }
-    return rc522_transmitir(trama, sizeof(trama), respuesta, &largo) && largo == 3;
-}
-
-static void rc522_detener_tarjeta(void)
-{
-    uint8_t trama[4] = {PICC_HALT, 0x00U, 0, 0};
-
-    if (rc522_calcular_crc(trama, 2, &trama[2])) {
-        rc522_transmitir(trama, sizeof(trama), 0, 0);
-    }
-}
-
-static uint8_t rc522_leer_uid(uint8_t uid[4])
-{
-    uint8_t uid_bcc[5];
-    uint8_t i;
-
-    if (!rc522_solicitar() || !rc522_anticolision(uid_bcc)) {
-        return 0;
-    }
-    if (!rc522_seleccionar(uid_bcc)) {
-        return 0;
-    }
-
+    UART("UID detectado: ");
     for (i = 0; i < 4; i++) {
-        uid[i] = uid_bcc[i];
+        uart_hex(uid[i]);
+        uart_caracter(i < 3 ? ' ' : '\r');
     }
-    rc522_detener_tarjeta();
-    return 1;
-}
-
-static uint8_t rc522_iniciar(void)
-{
-    uint16_t espera = 1000;
-    uint8_t version;
-
-    spi_iniciar();
-    PORTB &= (uint8_t)~(1 << RC522_RST);
-    _delay_ms(5);
-    PORTB |= (1 << RC522_RST);
-    _delay_ms(50);
-
-    rc522_escribir(RC522_COMMAND_REG, RC522_CMD_SOFT_RESET);
-    do {
-        _delay_ms(1);
-        if (!(rc522_leer(RC522_COMMAND_REG) & 0x10U)) {
-            break;
-        }
-    } while (--espera > 0);
-
-    rc522_escribir(RC522_T_MODE_REG, 0x8DU);
-    rc522_escribir(RC522_T_PRESCALER_REG, 0x3EU);
-    rc522_escribir(RC522_T_RELOAD_L_REG, 30U);
-    rc522_escribir(RC522_T_RELOAD_H_REG, 0U);
-    rc522_escribir(RC522_TX_ASK_REG, 0x40U);
-    rc522_escribir(RC522_MODE_REG, 0x3DU);
-    rc522_activar_bits(RC522_TX_CONTROL_REG, 0x03U);
-
-    version = rc522_leer(RC522_VERSION_REG);
-    uart_texto("RC522 VersionReg: 0x");
-    uart_hex(version);
-    uart_texto("\r\n");
-    return version != 0x00U && version != 0xFFU;
+    uart_caracter('\n');
 }
 
 static void cuentas_iniciar(void)
 {
-    static const Cuenta iniciales[CANTIDAD_CUENTAS] = {
-        {{0xA1, 0xB2, 0xC3, 0xD4}, {'1', '2', '3', '4'}, 15000},
-        {{0x11, 0x22, 0x33, 0x44}, {'1', '2', '3', '4'}, 8000},
-        {{0xDE, 0xAD, 0xBE, 0xEF}, {'1', '2', '3', '4'}, 25000}
-    };
+    /* Si la EEPROM no tiene esta version, carga los valores iniciales.
+       Luego copia todas las cuentas a SRAM para trabajar con ellas. */
+    Cuenta temporal;
+    uint8_t i, j;
 
-    if (eeprom_read_word(&version_eeprom) != VERSION_DATOS_EEPROM) {
-        eeprom_update_block(iniciales, cuentas_eeprom, sizeof(iniciales));
-        eeprom_update_word(&version_eeprom, VERSION_DATOS_EEPROM);
+    /* La versión evita reinicializar los saldos en cada encendido. */
+    if (eeprom_read_word(&version_eeprom) != VERSION_EEPROM) {
+        for (i = 0; i < CANTIDAD_CUENTAS; i++) {
+            /* Copia manual desde Flash para admitir versiones antiguas
+               de AVR-GCC que no incluyen la rutina de copia especial. */
+            for (j = 0; j < sizeof(Cuenta); j++) {
+                ((uint8_t *)&temporal)[j] = pgm_read_byte(
+                    ((const uint8_t *)&cuentas_iniciales[i]) + j);
+            }
+            eeprom_update_block(&temporal, &cuentas_eeprom[i],
+                                sizeof(Cuenta));
+        }
+        eeprom_update_word(&version_eeprom, VERSION_EEPROM);
     }
     eeprom_read_block(cuentas, cuentas_eeprom, sizeof(cuentas));
 }
 
 static int8_t buscar_cuenta(const uint8_t uid[4])
 {
-    uint8_t cuenta;
+    /* Busca coincidencia exacta de los cuatro bytes del UID. */
+    uint8_t i;
 
-    for (cuenta = 0; cuenta < CANTIDAD_CUENTAS; cuenta++) {
-        if (memcmp(uid, cuentas[cuenta].uid, 4) == 0) {
-            return (int8_t)cuenta;
+    for (i = 0; i < CANTIDAD_CUENTAS; i++) {
+        if (memcmp(uid, cuentas[i].uid, sizeof(cuentas[i].uid)) == 0) {
+            return (int8_t)i;
         }
     }
     return -1;
@@ -696,15 +788,38 @@ static int8_t buscar_cuenta(const uint8_t uid[4])
 
 static void mostrar_espera(void)
 {
+    /* Estado inicial y final de cada sesion. */
     estado = ESPERAR_TARJETA;
     cuenta_actual = -1;
-    lcd_linea(0, "CAJERO ATM");
-    lcd_linea(1, "Acerque tarjeta");
-    uart_texto("\r\n=== CAJERO AUTOMATICO ===\r\n");
-    uart_texto("Acerque una tarjeta al lector RC522.\r\n");
+    LCD(0, "CAJERO ATM");
+    LCD(1, "Acerque tarjeta");
+    UART("\r\n=== CAJERO AUTOMATICO ===\r\n");
+    UART("Acerque una tarjeta al lector RC522.\r\n");
 }
 
 static void mostrar_pin(void)
+{
+    /* Oculta cada digito ingresado mostrando un asterisco. */
+    char linea[17] = "PIN:            ";
+    uint8_t i;
+
+    for (i = 0; i < largo_pin; i++) {
+        linea[5U + i] = '*';
+    }
+    LCD(0, "Ingrese PIN");
+    lcd_linea(1, linea);
+}
+
+static void mostrar_menu(void)
+{
+    /* Cambia al estado de menu y muestra las cuatro opciones. */
+    estado = MOSTRAR_MENU;
+    LCD(0, "A Saldo B Retiro");
+    LCD(1, "C Dep D Sal *PIN");
+    UART("\r\nMENU: A Saldo | B Retiro | C Deposito | D Salir | * Cambiar PIN\r\n");
+}
+
+static void mostrar_cambio_pin(void)
 {
     char linea[17] = "PIN:            ";
     uint8_t i;
@@ -712,30 +827,33 @@ static void mostrar_pin(void)
     for (i = 0; i < largo_pin; i++) {
         linea[5U + i] = '*';
     }
-    lcd_linea(0, "Ingrese PIN");
+    if (estado == INGRESAR_NUEVO_PIN) {
+        LCD(0, "Nuevo PIN");
+    } else {
+        LCD(0, "Repita PIN");
+    }
     lcd_linea(1, linea);
 }
 
-static void mostrar_menu(void)
+static void mostrar_monto(void)
 {
-    estado = MOSTRAR_MENU;
-    lcd_linea(0, "A Saldo B Retiro");
-    lcd_linea(1, "C Depos D Salir");
-    uart_texto("\r\nMENU: A Saldo | B Retiro | C Deposito | D Salir\r\n");
-}
-
-static void mostrar_monto(const char *operacion)
-{
-    lcd_linea(0, operacion);
-    lcd_numero("Monto: $", monto_ingresado);
+    /* Presenta el monto acumulado en retiro o deposito. */
+    if (estado == INGRESAR_RETIRO) {
+        LCD(0, "RETIRO");
+    } else {
+        LCD(0, "DEPOSITO");
+    }
+    LCD_VALOR(1, "Monto: $", monto);
 }
 
 static void verificar_pin(void)
 {
+    /* Compara siempre cuatro caracteres. Al tercer error activa la alarma
+       y finaliza la sesion actual. */
     if (memcmp(pin_ingresado, cuentas[cuenta_actual].pin, 4) == 0) {
-        uart_texto("PIN correcto.\r\n");
-        lcd_linea(0, "PIN correcto");
-        lcd_linea(1, "Bienvenido");
+        UART("PIN correcto.\r\n");
+        LCD(0, "PIN correcto");
+        LCD(1, "Bienvenido");
         indicar_exito();
         mostrar_menu();
         return;
@@ -743,14 +861,14 @@ static void verificar_pin(void)
 
     intentos_pin++;
     largo_pin = 0;
-    uart_texto("PIN incorrecto.\r\n");
-    lcd_linea(0, "PIN incorrecto");
+    UART("PIN incorrecto.\r\n");
+    LCD(0, "PIN incorrecto");
     indicar_error();
 
     if (intentos_pin >= 3) {
-        uart_texto("Tres intentos fallidos. Acceso bloqueado.\r\n");
-        lcd_linea(0, "3 intentos");
-        lcd_linea(1, "Acceso bloqueado");
+        UART("Tres intentos fallidos. Acceso bloqueado.\r\n");
+        LCD(0, "3 intentos");
+        LCD(1, "Acceso bloqueado");
         alarma_intentos();
         _delay_ms(1000);
         mostrar_espera();
@@ -761,40 +879,34 @@ static void verificar_pin(void)
 
 static void procesar_pin(char tecla)
 {
+    /* D cancela, * borra y los digitos completan el PIN. */
     if (tecla == 'D') {
-        uart_texto("Ingreso cancelado.\r\n");
+        UART("Ingreso cancelado.\r\n");
         mostrar_espera();
-        return;
-    }
-
-    if (tecla == '*') {
+    } else if (tecla == '*') {
         if (largo_pin > 0) {
             largo_pin--;
         }
         mostrar_pin();
-        return;
-    }
-
-    if (tecla < '0' || tecla > '9' || largo_pin >= 4) {
-        return;
-    }
-
-    pin_ingresado[largo_pin++] = tecla;
-    mostrar_pin();
-    if (largo_pin == 4) {
-        verificar_pin();
+    } else if (tecla >= '0' && tecla <= '9' && largo_pin < 4) {
+        pin_ingresado[largo_pin++] = tecla;
+        mostrar_pin();
+        if (largo_pin == 4) {
+            verificar_pin();
+        }
     }
 }
 
 static void consultar_saldo(void)
 {
+    /* Muestra el saldo sin modificarlo y luego vuelve al menu. */
     uint32_t saldo = (uint32_t)cuentas[cuenta_actual].saldo;
 
-    lcd_linea(0, "Consulta saldo");
-    lcd_numero("Saldo: $", saldo);
-    uart_texto("Saldo actual: $");
+    LCD(0, "Consulta saldo");
+    LCD_VALOR(1, "Saldo: $", saldo);
+    UART("Saldo actual: $");
     uart_numero(saldo);
-    uart_texto("\r\n");
+    UART("\r\n");
     indicar_exito();
     _delay_ms(1200);
     mostrar_menu();
@@ -802,28 +914,40 @@ static void consultar_saldo(void)
 
 static void guardar_saldo(void)
 {
+    /* Persiste solamente el saldo actual. eeprom_update evita escribir
+       celdas que ya contienen el mismo valor. */
     eeprom_update_dword((uint32_t *)&cuentas_eeprom[cuenta_actual].saldo,
                         (uint32_t)cuentas[cuenta_actual].saldo);
 }
 
+static void guardar_pin(void)
+{
+    /* Actualiza el PIN en SRAM y EEPROM. La EEPROM conserva el cambio
+       aunque se reinicie o se desconecte la alimentacion del Arduino. */
+    memcpy(cuentas[cuenta_actual].pin, nuevo_pin, sizeof(nuevo_pin));
+    eeprom_update_block(nuevo_pin, &cuentas_eeprom[cuenta_actual].pin,
+                        sizeof(nuevo_pin));
+}
+
 static void confirmar_retiro(void)
 {
-    if (monto_ingresado == 0) {
-        lcd_linea(0, "Monto invalido");
-        uart_texto("Monto de retiro invalido.\r\n");
+    /* Rechaza cero y montos superiores al saldo disponible. */
+    if (monto == 0) {
+        LCD(0, "Monto invalido");
+        UART("Monto de retiro invalido.\r\n");
         indicar_error();
-    } else if (monto_ingresado > (uint32_t)cuentas[cuenta_actual].saldo) {
-        lcd_linea(0, "Saldo insufic.");
-        uart_texto("Saldo insuficiente.\r\n");
+    } else if (monto > (uint32_t)cuentas[cuenta_actual].saldo) {
+        LCD(0, "Saldo insufic.");
+        UART("Saldo insuficiente.\r\n");
         indicar_error();
     } else {
-        cuentas[cuenta_actual].saldo -= (int32_t)monto_ingresado;
+        cuentas[cuenta_actual].saldo -= (int32_t)monto;
         guardar_saldo();
-        lcd_linea(0, "Retiro exitoso");
-        lcd_numero("Saldo: $", (uint32_t)cuentas[cuenta_actual].saldo);
-        uart_texto("Retiro exitoso. Nuevo saldo: $");
+        LCD(0, "Retiro exitoso");
+        LCD_VALOR(1, "Saldo: $", (uint32_t)cuentas[cuenta_actual].saldo);
+        UART("Retiro exitoso. Nuevo saldo: $");
         uart_numero((uint32_t)cuentas[cuenta_actual].saldo);
-        uart_texto("\r\n");
+        UART("\r\n");
         indicar_exito();
     }
     _delay_ms(1200);
@@ -832,52 +956,124 @@ static void confirmar_retiro(void)
 
 static void confirmar_deposito(void)
 {
-    if (monto_ingresado == 0 ||
-        monto_ingresado > (uint32_t)(2147483647L - cuentas[cuenta_actual].saldo)) {
-        lcd_linea(0, "Monto invalido");
-        uart_texto("Monto de deposito invalido.\r\n");
+    /* Rechaza cero y evita desbordar el rango positivo de int32_t. */
+    if (monto == 0 ||
+        monto > (uint32_t)(2147483647L - cuentas[cuenta_actual].saldo)) {
+        LCD(0, "Monto invalido");
+        UART("Monto de deposito invalido.\r\n");
         indicar_error();
     } else {
-        cuentas[cuenta_actual].saldo += (int32_t)monto_ingresado;
+        cuentas[cuenta_actual].saldo += (int32_t)monto;
         guardar_saldo();
-        lcd_linea(0, "Deposito exitoso");
-        lcd_numero("Saldo: $", (uint32_t)cuentas[cuenta_actual].saldo);
-        uart_texto("Deposito exitoso. Nuevo saldo: $");
+        LCD(0, "Deposito exitoso");
+        LCD_VALOR(1, "Saldo: $", (uint32_t)cuentas[cuenta_actual].saldo);
+        UART("Deposito exitoso. Nuevo saldo: $");
         uart_numero((uint32_t)cuentas[cuenta_actual].saldo);
-        uart_texto("\r\n");
+        UART("\r\n");
         indicar_exito();
     }
     _delay_ms(1200);
     mostrar_menu();
 }
 
-static void iniciar_operacion(Estado nuevo_estado, const char *titulo)
+static void iniciar_operacion(Estado operacion)
 {
-    estado = nuevo_estado;
-    monto_ingresado = 0;
+    /* Prepara una nueva carga de monto para retiro o deposito. */
+    estado = operacion;
+    monto = 0;
     digitos_monto = 0;
-    mostrar_monto(titulo);
-    uart_texto("Ingrese el monto. # confirma, * borra y D cancela.\r\n");
+    mostrar_monto();
+    UART("Ingrese el monto. # confirma, * borra y D cancela.\r\n");
+}
+
+static void iniciar_cambio_pin(void)
+{
+    /* El usuario ya fue autenticado, por eso se solicita directamente
+       el PIN nuevo y luego una segunda escritura para confirmarlo. */
+    estado = INGRESAR_NUEVO_PIN;
+    largo_pin = 0;
+    mostrar_cambio_pin();
+    UART("Ingrese el nuevo PIN de 4 digitos. * borra y D cancela.\r\n");
+}
+
+static void procesar_cambio_pin(char tecla)
+{
+    if (tecla == 'D') {
+        UART("Cambio de PIN cancelado.\r\n");
+        mostrar_menu();
+        return;
+    }
+
+    if (tecla == '*') {
+        if (largo_pin > 0) {
+            largo_pin--;
+        }
+        mostrar_cambio_pin();
+        return;
+    }
+
+    if (tecla < '0' || tecla > '9' || largo_pin >= 4) {
+        return;
+    }
+
+    if (estado == INGRESAR_NUEVO_PIN) {
+        nuevo_pin[largo_pin++] = tecla;
+        mostrar_cambio_pin();
+        if (largo_pin == 4) {
+            estado = CONFIRMAR_NUEVO_PIN;
+            largo_pin = 0;
+            mostrar_cambio_pin();
+            UART("Repita el nuevo PIN.\r\n");
+        }
+        return;
+    }
+
+    pin_ingresado[largo_pin++] = tecla;
+    mostrar_cambio_pin();
+    if (largo_pin == 4) {
+        if (memcmp(pin_ingresado, nuevo_pin, sizeof(nuevo_pin)) == 0) {
+            guardar_pin();
+            LCD(0, "PIN actualizado");
+            LCD(1, "Cambio guardado");
+            UART("PIN actualizado y guardado en EEPROM.\r\n");
+            indicar_exito();
+            _delay_ms(800);
+            mostrar_menu();
+        } else {
+            LCD(0, "PIN no coincide");
+            LCD(1, "Intente de nuevo");
+            UART("Los PIN no coinciden. Ingrese nuevamente el PIN nuevo.\r\n");
+            indicar_error();
+            _delay_ms(800);
+            estado = INGRESAR_NUEVO_PIN;
+            largo_pin = 0;
+            mostrar_cambio_pin();
+        }
+    }
 }
 
 static void procesar_menu(char tecla)
 {
+    /* A consulta, B retira, C deposita y D cierra la sesion. */
     switch (tecla) {
         case 'A':
             consultar_saldo();
             break;
         case 'B':
-            iniciar_operacion(INGRESAR_RETIRO, "RETIRO");
+            iniciar_operacion(INGRESAR_RETIRO);
             break;
         case 'C':
-            iniciar_operacion(INGRESAR_DEPOSITO, "DEPOSITO");
+            iniciar_operacion(INGRESAR_DEPOSITO);
             break;
         case 'D':
-            uart_texto("Sesion finalizada.\r\n");
-            lcd_linea(0, "Sesion cerrada");
-            lcd_linea(1, "Retire tarjeta");
+            UART("Sesion finalizada.\r\n");
+            LCD(0, "Sesion cerrada");
+            LCD(1, "Retire tarjeta");
             _delay_ms(1000);
             mostrar_espera();
+            break;
+        case '*':
+            iniciar_cambio_pin();
             break;
         default:
             break;
@@ -886,117 +1082,150 @@ static void procesar_menu(char tecla)
 
 static void procesar_monto(char tecla)
 {
+    /* D cancela, * elimina el ultimo digito, # confirma y los numeros
+       construyen el monto con monto = monto * 10 + nuevo_digito. */
     if (tecla == 'D') {
-        uart_texto("Operacion cancelada.\r\n");
+        UART("Operacion cancelada.\r\n");
         mostrar_menu();
-        return;
-    }
-
-    if (tecla == '*') {
+    } else if (tecla == '*') {
         if (digitos_monto > 0) {
-            monto_ingresado /= 10U;
+            monto /= 10U;
             digitos_monto--;
-            mostrar_monto(estado == INGRESAR_RETIRO ? "RETIRO" : "DEPOSITO");
+            mostrar_monto();
         }
-        return;
-    }
-
-    if (tecla == '#') {
+    } else if (tecla == '#') {
         if (estado == INGRESAR_RETIRO) {
             confirmar_retiro();
         } else {
             confirmar_deposito();
         }
-        return;
-    }
-
-    if (tecla >= '0' && tecla <= '9' && digitos_monto < 9) {
-        monto_ingresado = monto_ingresado * 10U + (uint8_t)(tecla - '0');
+    } else if (tecla >= '0' && tecla <= '9' && digitos_monto < 9) {
+        monto = monto * 10U + (uint8_t)(tecla - '0');
         digitos_monto++;
-        mostrar_monto(estado == INGRESAR_RETIRO ? "RETIRO" : "DEPOSITO");
+        mostrar_monto();
     }
 }
 
 static void procesar_tarjeta(void)
 {
+    /* Consulta el RC522. Si obtiene un UID registrado, inicia el ingreso
+       de PIN; si no esta registrado, informa el UID y vuelve a esperar. */
     uint8_t uid[4];
 
     if (!rc522_leer_uid(uid)) {
         return;
     }
 
-    uart_uid(uid);
+    imprimir_uid(uid);
     cuenta_actual = buscar_cuenta(uid);
     if (cuenta_actual < 0) {
-        uart_texto("Tarjeta no registrada. Anote el UID mostrado.\r\n");
-        lcd_linea(0, "Tarjeta invalida");
-        lcd_linea(1, "UID por terminal");
+        UART("Tarjeta no registrada. Anote el UID mostrado.\r\n");
+        LCD(0, "Tarjeta invalida");
+        LCD(1, "UID por terminal");
         indicar_error();
         _delay_ms(700);
         mostrar_espera();
         return;
     }
 
-    uart_texto("Tarjeta reconocida. Ingrese PIN.\r\n");
+    UART("Tarjeta reconocida. Ingrese PIN.\r\n");
     estado = INGRESAR_PIN;
     intentos_pin = 0;
     largo_pin = 0;
     mostrar_pin();
 }
 
-int main(void)
+void cajero_iniciar(void)
 {
-    char tecla;
-    uint8_t lector_disponible;
+    /* Inicializa una vez todos los perifericos y datos del cajero. */
+    uint8_t version_rc522;
 
     uart_iniciar();
     salidas_iniciar();
     teclado_iniciar();
-    twi_iniciar();
-    lcd_iniciar();
     cuentas_iniciar();
 
-    uart_texto("\r\nIniciando lector RFID...\r\n");
-    lector_disponible = rc522_iniciar();
+    if (lcd_iniciar()) {
+        UART("LCD I2C detectado en 0x");
+        uart_hex(lcd_direccion());
+        UART(".\r\n");
+    } else {
+        UART("Aviso: no se encontro ningun dispositivo I2C.\r\n");
+    }
+
+    version_rc522 = rc522_iniciar();
+    UART("RC522 VersionReg: 0x");
+    uart_hex(version_rc522);
+    UART("\r\n");
+    /* 0x91 y 0x92 corresponden al MFRC522 original.
+       El lector utilizado en el montaje se identifica como 0xB2. */
+    lector_disponible = version_rc522 == 0x91U ||
+                        version_rc522 == 0x92U ||
+                        version_rc522 == 0xB2U;
+
     if (!lector_disponible) {
-        uart_texto("ERROR: el RC522 no responde. Revise 3.3 V, GND y SPI.\r\n");
-        lcd_linea(0, "Error RC522");
-        lcd_linea(1, "Revise conexion");
+        UART("ERROR: revise 3.3 V, GND y las conexiones SPI.\r\n");
+        LCD(0, "Error RC522");
+        LCD(1, "Revise conexion");
         indicar_error();
         _delay_ms(1200);
-    } else {
-        uart_texto("RC522 listo.\r\n");
-    }
-
-    if (!lcd_activo) {
-        uart_texto("Aviso: LCD I2C no encontrado en 0x27 ni 0x3F.\r\n");
-    } else {
-        uart_texto("LCD I2C detectado en 0x");
-        uart_hex(lcd_direccion);
-        uart_texto(".\r\n");
     }
     mostrar_espera();
+}
+
+void cajero_actualizar(void)
+{
+    char tecla;
+
+    /* Cada llamada procesa una sola entrada de la maquina de estados.
+       Esta funcion se invoca repetidamente desde while(1); no es una ISR. */
+    if (estado == ESPERAR_TARJETA) {
+        if (lector_disponible) {
+            procesar_tarjeta();
+        }
+        _delay_ms(30);
+        return;
+    }
+
+    tecla = teclado_leer();
+    if (tecla == '\0') {
+        return;
+    }
+
+    /* El switch implementa directamente la maquina de estados. */
+    switch (estado) {
+        case INGRESAR_PIN:
+            procesar_pin(tecla);
+            break;
+
+        case MOSTRAR_MENU:
+            procesar_menu(tecla);
+            break;
+
+        case INGRESAR_RETIRO:
+        case INGRESAR_DEPOSITO:
+            procesar_monto(tecla);
+            break;
+
+        case INGRESAR_NUEVO_PIN:
+        case CONFIRMAR_NUEVO_PIN:
+            procesar_cambio_pin(tecla);
+            break;
+
+        case ESPERAR_TARJETA:
+        default:
+            break;
+    }
+}
+
+/* ==================== PROGRAMA PRINCIPAL ==================== */
+
+int main(void)
+{
+    /* Superloop: inicializacion unica y actualizacion continua por polling. */
+    cajero_iniciar();
 
     while (1) {
-        if (estado == ESPERAR_TARJETA) {
-            if (lector_disponible) {
-                procesar_tarjeta();
-            }
-            _delay_ms(30);
-            continue;
-        }
-
-        tecla = teclado_leer();
-        if (tecla == '\0') {
-            continue;
-        }
-
-        if (estado == INGRESAR_PIN) {
-            procesar_pin(tecla);
-        } else if (estado == MOSTRAR_MENU) {
-            procesar_menu(tecla);
-        } else if (estado == INGRESAR_RETIRO || estado == INGRESAR_DEPOSITO) {
-            procesar_monto(tecla);
-        }
+        cajero_actualizar();
     }
 }
