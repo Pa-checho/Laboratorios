@@ -40,6 +40,7 @@
 #include <util/delay.h>
 #include <util/twi.h>
 #include <stdint.h>
+#include <stdio.h>
 
 /*
  * Se usan nombres del puerto del ATmega328P y no numeros de Arduino:
@@ -414,45 +415,34 @@ static void timer2_init(void)
    ADC Y ACTIVIDAD DEL POTENCIOMETRO
    ========================================================= */
 
-static void adc_habilitar(void)
+static void ADC_init(void)
 {
-    /*
-     * REFS0 selecciona AVcc como referencia del ADC.
-     * Con ADPS2:0 en 111 se usa prescaler 128:
-     * 16 MHz / 128 = 125 kHz, dentro del rango recomendado para el ADC.
-     */
+    DDRC &= (uint8_t)~(1U << DDC0);
+    PORTC &= (uint8_t)~(1U << PORTC0);
+
+    /* AVcc como referencia y reloj del ADC a 125 kHz. */
     ADMUX = (1U << REFS0);
     ADCSRA = (1U << ADEN) |
              (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);
 }
 
-static void adc_deshabilitar(void)
+static void ADC_disable(void)
 {
     ADCSRA &= (uint8_t)~(1U << ADEN);
 }
 
-static void adc_init(void)
-{
-    DDRC &= (uint8_t)~(1U << DDC0);
-    PORTC &= (uint8_t)~(1U << PORTC0);
-    adc_habilitar();
-}
-
-/*
- * Inicia una conversion en A0 y espera solamente el tiempo propio del ADC,
- * aproximadamente 104 us. El resultado es de 10 bits: 0 a 1023.
- */
-static uint16_t adc_leer_a0(void)
+static uint16_t ADC_read(uint8_t canal)
 {
     if ((ADCSRA & (1U << ADEN)) == 0U) {
-        adc_habilitar();
+        ADC_init();
     }
 
-    ADMUX = (1U << REFS0);
+    canal &= 0x07U;
+    ADMUX = (uint8_t)((ADMUX & 0xF0U) | canal);
     ADCSRA |= (1U << ADSC);
 
     while ((ADCSRA & (1U << ADSC)) != 0U) {
-        /* La conversion dura aproximadamente 104 us. */
+        /* Espera breve propia de la conversion. */
     }
 
     return ADC;
@@ -484,10 +474,10 @@ static void revisar_actividad_adc(uint16_t nueva_lectura, uint32_t ahora)
 }
 
 /* =========================================================
-   TWI / LCD 16x2 CON PCF8574
+   I2C / LCD 16x2 CON PCF8574
    ========================================================= */
 
-static uint8_t twi_esperar(void)
+static uint8_t i2c_esperar(void)
 {
     uint16_t timeout;
 
@@ -505,7 +495,7 @@ static uint8_t twi_esperar(void)
  * Inicializa el TWI, que es el nombre que AVR utiliza para el bus I2C.
  * A4 es SDA y A5 es SCL. El bus queda configurado aproximadamente a 100 kHz.
  */
-static void twi_init(void)
+static void i2c_init(void)
 {
     DDRC &= (uint8_t)~((1U << DDC4) | (1U << DDC5));
     PORTC |= (1U << PORTC4) | (1U << PORTC5);
@@ -515,12 +505,12 @@ static void twi_init(void)
     TWCR = (1U << TWEN);
 }
 
-static uint8_t twi_iniciar(uint8_t direccion_escritura)
+static uint8_t i2c_start(uint8_t direccion_escritura)
 {
     uint8_t estado_twi;
 
     TWCR = (1U << TWINT) | (1U << TWSTA) | (1U << TWEN);
-    if (!twi_esperar()) {
+    if (!i2c_esperar()) {
         return 0U;
     }
 
@@ -531,26 +521,26 @@ static uint8_t twi_iniciar(uint8_t direccion_escritura)
 
     TWDR = direccion_escritura;
     TWCR = (1U << TWINT) | (1U << TWEN);
-    if (!twi_esperar()) {
+    if (!i2c_esperar()) {
         return 0U;
     }
 
     return ((TWSR & 0xF8U) == TW_MT_SLA_ACK) ? 1U : 0U;
 }
 
-static uint8_t twi_enviar(uint8_t dato)
+static uint8_t i2c_write(uint8_t dato)
 {
     TWDR = dato;
     TWCR = (1U << TWINT) | (1U << TWEN);
 
-    if (!twi_esperar()) {
+    if (!i2c_esperar()) {
         return 0U;
     }
 
     return ((TWSR & 0xF8U) == TW_MT_DATA_ACK) ? 1U : 0U;
 }
 
-static void twi_stop(void)
+static void i2c_stop(void)
 {
     uint16_t timeout;
 
@@ -568,11 +558,11 @@ static uint8_t lcd_expansor(uint8_t valor)
 {
     uint8_t correcto;
 
-    correcto = twi_iniciar((uint8_t)(direccion_lcd << 1));
+    correcto = i2c_start((uint8_t)(direccion_lcd << 1));
     if (correcto) {
-        correcto = twi_enviar((uint8_t)(valor | luz_lcd));
+        correcto = i2c_write((uint8_t)(valor | luz_lcd));
     }
-    twi_stop();
+    i2c_stop();
 
     return correcto;
 }
@@ -595,7 +585,7 @@ static void lcd_apagar_luz(void)
     (void)lcd_expansor(0U);
 }
 
-static uint8_t lcd_pulso(uint8_t valor)
+static uint8_t lcd_enviar_nibble(uint8_t valor)
 {
     if (!lcd_expansor((uint8_t)(valor | LCD_E))) {
         return 0U;
@@ -610,28 +600,16 @@ static uint8_t lcd_pulso(uint8_t valor)
     return 1U;
 }
 
-static uint8_t lcd_medio_byte(uint8_t valor)
-{
-    if (!lcd_expansor(valor)) {
-        return 0U;
-    }
-
-    return lcd_pulso(valor);
-}
-
-static uint8_t lcd_byte(uint8_t valor, uint8_t es_dato)
+static uint8_t lcd_i2c_write(uint8_t dato, uint8_t es_dato)
 {
     uint8_t control = es_dato ? LCD_RS : 0U;
 
-    if (!lcd_medio_byte((uint8_t)((valor & 0xF0U) | control))) {
+    if (!lcd_enviar_nibble((uint8_t)((dato & 0xF0U) | control))) {
         return 0U;
     }
 
-    if (!lcd_medio_byte((uint8_t)(((valor << 4) & 0xF0U) | control))) {
-        return 0U;
-    }
-
-    return 1U;
+    return lcd_enviar_nibble(
+        (uint8_t)(((dato << 4) & 0xF0U) | control));
 }
 
 static void lcd_comando(uint8_t comando)
@@ -640,7 +618,7 @@ static void lcd_comando(uint8_t comando)
         return;
     }
 
-    if (!lcd_byte(comando, 0U)) {
+    if (!lcd_i2c_write(comando, 0U)) {
         lcd_disponible = 0U;
         return;
     }
@@ -656,7 +634,7 @@ static void lcd_dato(uint8_t dato)
         return;
     }
 
-    if (!lcd_byte(dato, 1U)) {
+    if (!lcd_i2c_write(dato, 1U)) {
         lcd_disponible = 0U;
     }
 }
@@ -672,13 +650,13 @@ static uint8_t lcd_init(void)
     for (indice = 0U;
          indice < (uint8_t)sizeof(direcciones_posibles);
          indice++) {
-        if (twi_iniciar((uint8_t)(direcciones_posibles[indice] << 1))) {
+        if (i2c_start((uint8_t)(direcciones_posibles[indice] << 1))) {
             direccion_lcd = direcciones_posibles[indice];
             encontrado = 1U;
-            twi_stop();
+            i2c_stop();
             break;
         }
-        twi_stop();
+        i2c_stop();
     }
 
     if (!encontrado) {
@@ -687,12 +665,12 @@ static uint8_t lcd_init(void)
 
     lcd_disponible = 1U;
 
-    (void)lcd_medio_byte(0x30U);
+    (void)lcd_enviar_nibble(0x30U);
     _delay_ms(5);
-    (void)lcd_medio_byte(0x30U);
+    (void)lcd_enviar_nibble(0x30U);
     _delay_us(150);
-    (void)lcd_medio_byte(0x30U);
-    (void)lcd_medio_byte(0x20U);
+    (void)lcd_enviar_nibble(0x30U);
+    (void)lcd_enviar_nibble(0x20U);
 
     lcd_comando(0x28U);
     lcd_comando(0x0CU);
@@ -702,40 +680,19 @@ static uint8_t lcd_init(void)
     return lcd_disponible;
 }
 
-static void linea_limpiar(char linea[17])
+static void lcd_linea(uint8_t fila, const char *linea)
 {
     uint8_t i;
-
-    for (i = 0U; i < 16U; i++) {
-        linea[i] = ' ';
-    }
-    linea[16] = '\0';
-}
-
-static void linea_texto(char linea[17], uint8_t posicion, const char *texto)
-{
-    while (*texto != '\0' && posicion < 16U) {
-        linea[posicion++] = *texto++;
-    }
-}
-
-static void linea_numero(char linea[17], uint8_t posicion,
-                         uint16_t numero, uint8_t cifras)
-{
-    while (cifras > 0U) {
-        cifras--;
-        linea[posicion + cifras] = (char)('0' + (numero % 10U));
-        numero /= 10U;
-    }
-}
-
-static void lcd_linea(uint8_t fila, const char linea[17])
-{
-    uint8_t i;
+    uint8_t fin = 0U;
 
     lcd_comando(fila == 0U ? 0x80U : 0xC0U);
     for (i = 0U; i < 16U; i++) {
-        lcd_dato((uint8_t)linea[i]);
+        if (!fin && *linea != '\0') {
+            lcd_dato((uint8_t)*linea++);
+        } else {
+            fin = 1U;
+            lcd_dato((uint8_t)' ');
+        }
     }
 }
 
@@ -744,20 +701,14 @@ static void mostrar_activo(void)
     char linea1[17];
     char linea2[17];
 
-    linea_limpiar(linea1);
-    linea_limpiar(linea2);
-
-    linea_texto(linea1, 0U, "ACTIVO ADC:");
-    linea_numero(linea1, 11U, valor_adc_actual, 4U);
+    (void)snprintf(linea1, sizeof(linea1),
+                   "ACTIVO ADC:%4u", valor_adc_actual);
 
     if (lectura_dht_correcta) {
-        linea_texto(linea2, 0U, "T:");
-        linea_numero(linea2, 2U, temperatura, 2U);
-        linea_texto(linea2, 4U, "C H:");
-        linea_numero(linea2, 8U, humedad, 3U);
-        linea2[11] = '%';
+        (void)snprintf(linea2, sizeof(linea2),
+                       "T:%uC H:%u%%", temperatura, humedad);
     } else {
-        linea_texto(linea2, 0U, "DHT: ESPERANDO");
+        (void)snprintf(linea2, sizeof(linea2), "DHT: ESPERANDO");
     }
 
     lcd_linea(0U, linea1);
@@ -766,41 +717,20 @@ static void mostrar_activo(void)
 
 static void mostrar_standby(void)
 {
-    char linea1[17];
-    char linea2[17];
-
-    linea_limpiar(linea1);
-    linea_limpiar(linea2);
-    linea_texto(linea1, 0U, "STANDBY");
-    linea_texto(linea2, 0U, "Esperando...");
-    lcd_linea(0U, linea1);
-    lcd_linea(1U, linea2);
+    lcd_linea(0U, "STANDBY");
+    lcd_linea(1U, "Esperando...");
 }
 
 static void mostrar_apagado(void)
 {
-    char linea1[17];
-    char linea2[17];
-
-    linea_limpiar(linea1);
-    linea_limpiar(linea2);
-    linea_texto(linea1, 0U, "APAGADO");
-    linea_texto(linea2, 0U, "Pulse el boton");
-    lcd_linea(0U, linea1);
-    lcd_linea(1U, linea2);
+    lcd_linea(0U, "APAGADO");
+    lcd_linea(1U, "Pulse el boton");
 }
 
 static void mostrar_seguro(void)
 {
-    char linea1[17];
-    char linea2[17];
-
-    linea_limpiar(linea1);
-    linea_limpiar(linea2);
-    linea_texto(linea1, 0U, "EMERGENCIA");
-    linea_texto(linea2, 0U, "Pulse para salir");
-    lcd_linea(0U, linea1);
-    lcd_linea(1U, linea2);
+    lcd_linea(0U, "EMERGENCIA");
+    lcd_linea(1U, "Pulse para salir");
 }
 
 /* =========================================================
@@ -933,7 +863,7 @@ static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
     uint8_t estado_interrupciones;
 
     alarma_continua = 0U;
-    adc_habilitar();
+    ADC_init();
     lcd_encender_luz();
     lcd_comando(0x0CU);
 
@@ -965,7 +895,7 @@ static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
 static void entrar_standby(void)
 {
     estado = ESTADO_STANDBY;
-    adc_deshabilitar();
+    ADC_disable();
     cancelar_dht();
     PORTB &= (uint8_t)~(1U << LED_PIN);
     lcd_encender_luz();
@@ -976,7 +906,7 @@ static void entrar_standby(void)
 static void entrar_apagado(void)
 {
     estado = ESTADO_APAGADO;
-    adc_deshabilitar();
+    ADC_disable();
     cancelar_dht();
     apagar_sonido();
     PORTB &= (uint8_t)~(1U << LED_PIN);
@@ -991,7 +921,7 @@ static void entrar_apagado(void)
 static void entrar_seguro(void)
 {
     estado = ESTADO_SEGURO;
-    adc_deshabilitar();
+    ADC_disable();
     cancelar_dht();
     lcd_encender_luz();
     lcd_comando(0x0CU);
@@ -1098,7 +1028,7 @@ static void ejecutar_tareas(uint32_t ahora)
 
     if (bandera_adc) {
         bandera_adc = 0U;
-        valor_adc_actual = adc_leer_a0();
+        valor_adc_actual = ADC_read(0U);
         revisar_actividad_adc(valor_adc_actual, ahora);
     }
 
@@ -1140,28 +1070,21 @@ int main(void)
     uint32_t ahora;
 
     gpio_init();
-    adc_init();
+    ADC_init();
     timer2_init();
-    twi_init();
+    i2c_init();
     (void)lcd_init();
 
     if (lcd_disponible) {
-        char mensaje1[17];
-        char mensaje2[17];
-
-        linea_limpiar(mensaje1);
-        linea_limpiar(mensaje2);
-        linea_texto(mensaje1, 0U, "LAB 5 - PROB A");
-        linea_texto(mensaje2, 0U, "INICIANDO...");
-        lcd_linea(0U, mensaje1);
-        lcd_linea(1U, mensaje2);
+        lcd_linea(0U, "LAB 5 - PROB A");
+        lcd_linea(1U, "INICIANDO...");
         _delay_ms(800);
     }
 
     timer0_init();
     timer1_init();
 
-    valor_adc_actual = adc_leer_a0();
+    valor_adc_actual = ADC_read(0U);
     referencia_adc_actividad = valor_adc_actual;
     referencia_adc_valida = 1U;
     ultima_actividad = 0UL;
