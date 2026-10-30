@@ -1,6 +1,6 @@
 /*
  * LABORATORIO 5 - PROBLEMA A
- * Primera prueba integral del montaje en Proteus.
+ * Simulacion completa del Problema A en Proteus.
  *
  * ATmega328P / Arduino Uno a 16 MHz
  *
@@ -33,6 +33,23 @@
 #define LCD_CMD             0x80U
 #define LCD_DATA            0x40U
 
+#define PERIODO_LED_MS              200U
+#define PERIODO_LCD_MS              500U
+#define PERIODO_DHT_MS              2000U
+#define DURACION_SOUNDER_MS          500U
+#define ANTI_REBOTE_MS              50UL
+#define PULSACION_EMERGENCIA_MS      2000UL
+#define TIEMPO_STANDBY_MS            10000UL
+#define TIEMPO_APAGADO_MS            30000UL
+#define UMBRAL_ACTIVIDAD_ADC         20U
+
+typedef enum {
+    ESTADO_ACTIVO = 0,
+    ESTADO_STANDBY,
+    ESTADO_APAGADO,
+    ESTADO_SEGURO
+} estado_sistema_t;
+
 static volatile uint32_t tiempo_ms = 0UL;
 static volatile uint16_t contador_led = 0U;
 static volatile uint16_t contador_lcd = 0U;
@@ -44,12 +61,22 @@ static volatile uint8_t tarea_adc = 0U;
 static volatile uint8_t tarea_lcd = 0U;
 static volatile uint8_t tarea_dht = 0U;
 static volatile uint8_t evento_boton = 0U;
+static volatile uint8_t alarma_continua = 0U;
 
 static uint16_t valor_adc = 0U;
 static uint8_t temperatura = 0U;
 static uint8_t humedad = 0U;
 static uint8_t dht_valido = 0U;
 static uint8_t lcd_disponible = 0U;
+static estado_sistema_t estado = ESTADO_ACTIVO;
+
+static uint32_t ultima_actividad = 0UL;
+static uint32_t inicio_boton = 0UL;
+static uint32_t ultimo_boton = 0UL;
+static uint8_t boton_presionado = 0U;
+static uint8_t pulsacion_larga_lista = 0U;
+static uint16_t referencia_adc = 0U;
+static uint8_t referencia_adc_valida = 0U;
 
 /* =========================================================
    INTERRUPCIONES
@@ -61,31 +88,32 @@ ISR(TIMER0_COMPA_vect)
     tiempo_ms++;
 
     contador_led++;
-    if (contador_led >= 200U) {
+    if (contador_led >= PERIODO_LED_MS) {
         contador_led = 0U;
         tarea_led = 1U;
     }
 
     contador_lcd++;
-    if (contador_lcd >= 500U) {
+    if (contador_lcd >= PERIODO_LCD_MS) {
         contador_lcd = 0U;
         tarea_lcd = 1U;
     }
 
     contador_dht++;
-    if (contador_dht >= 2000U) {
+    if (contador_dht >= PERIODO_DHT_MS) {
         contador_dht = 0U;
         tarea_dht = 1U;
     }
 
     /* Un cambio por milisegundo produce 500 Hz: periodo total de 2 ms. */
-    if (sounder_restante_ms > 0U) {
+    if (alarma_continua || sounder_restante_ms > 0U) {
         PORTB ^= (1U << SOUNDER_PIN);
-        sounder_restante_ms--;
 
-        if (sounder_restante_ms == 0U) {
-            PORTB &= (uint8_t)~(1U << SOUNDER_PIN);
+        if (!alarma_continua && sounder_restante_ms > 0U) {
+            sounder_restante_ms--;
         }
+    } else {
+        PORTB &= (uint8_t)~(1U << SOUNDER_PIN);
     }
 }
 
@@ -170,7 +198,29 @@ static void sounder_activar(uint16_t duracion_ms)
     uint8_t sreg = SREG;
 
     cli();
+    alarma_continua = 0U;
     sounder_restante_ms = duracion_ms;
+    PORTB &= (uint8_t)~(1U << SOUNDER_PIN);
+    SREG = sreg;
+}
+
+static void alarma_activar(void)
+{
+    uint8_t sreg = SREG;
+
+    cli();
+    sounder_restante_ms = 0U;
+    alarma_continua = 1U;
+    SREG = sreg;
+}
+
+static void sounder_apagar(void)
+{
+    uint8_t sreg = SREG;
+
+    cli();
+    sounder_restante_ms = 0U;
+    alarma_continua = 0U;
     PORTB &= (uint8_t)~(1U << SOUNDER_PIN);
     SREG = sreg;
 }
@@ -179,19 +229,33 @@ static void sounder_activar(uint16_t duracion_ms)
    ADC
    ========================================================= */
 
+static void adc_habilitar(void)
+{
+    ADMUX = (1U << REFS0);
+    ADCSRA = (1U << ADEN) |
+             (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);
+}
+
+static void adc_deshabilitar(void)
+{
+    ADCSRA &= (uint8_t)~(1U << ADEN);
+}
+
 static void adc_init(void)
 {
     DDRC &= (uint8_t)~(1U << DDC0);
     PORTC &= (uint8_t)~(1U << PORTC0);
 
     /* Referencia AVcc y canal ADC0. Reloj ADC = 16 MHz / 128 = 125 kHz. */
-    ADMUX = (1U << REFS0);
-    ADCSRA = (1U << ADEN) |
-             (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);
+    adc_habilitar();
 }
 
 static uint16_t adc_leer_a0(void)
 {
+    if ((ADCSRA & (1U << ADEN)) == 0U) {
+        adc_habilitar();
+    }
+
     ADMUX = (1U << REFS0);       /* ADC0. */
     ADCSRA |= (1U << ADSC);      /* Inicia conversion. */
 
@@ -355,7 +419,14 @@ static void poner_numero(char linea[17], uint8_t posicion,
     }
 }
 
-static void lcd_actualizar(void)
+static void poner_texto(char linea[17], uint8_t posicion, const char *texto)
+{
+    while (*texto != '\0' && posicion < 16U) {
+        linea[posicion++] = *texto++;
+    }
+}
+
+static void lcd_mostrar_activo(void)
 {
     char linea1[17];
     char linea2[17];
@@ -363,11 +434,8 @@ static void lcd_actualizar(void)
     linea_vacia(linea1);
     linea_vacia(linea2);
 
-    linea1[0] = 'A';
-    linea1[1] = 'D';
-    linea1[2] = 'C';
-    linea1[3] = ':';
-    poner_numero(linea1, 5U, valor_adc, 4U);
+    poner_texto(linea1, 0U, "ACTIVO ADC:");
+    poner_numero(linea1, 11U, valor_adc, 4U);
 
     if (dht_valido) {
         linea2[0] = 'T';
@@ -391,6 +459,45 @@ static void lcd_actualizar(void)
         linea2[10] = 'A';
     }
 
+    lcd_linea(0U, linea1);
+    lcd_linea(1U, linea2);
+}
+
+static void lcd_mostrar_standby(void)
+{
+    char linea1[17];
+    char linea2[17];
+
+    linea_vacia(linea1);
+    linea_vacia(linea2);
+    poner_texto(linea1, 0U, "STANDBY");
+    poner_texto(linea2, 0U, "Esperando...");
+    lcd_linea(0U, linea1);
+    lcd_linea(1U, linea2);
+}
+
+static void lcd_mostrar_apagado(void)
+{
+    char linea1[17];
+    char linea2[17];
+
+    linea_vacia(linea1);
+    linea_vacia(linea2);
+    poner_texto(linea1, 0U, "APAGADO");
+    poner_texto(linea2, 0U, "Pulse el boton");
+    lcd_linea(0U, linea1);
+    lcd_linea(1U, linea2);
+}
+
+static void lcd_mostrar_seguro(void)
+{
+    char linea1[17];
+    char linea2[17];
+
+    linea_vacia(linea1);
+    linea_vacia(linea2);
+    poner_texto(linea1, 0U, "EMERGENCIA");
+    poner_texto(linea2, 0U, "Pulse para salir");
     lcd_linea(0U, linea1);
     lcd_linea(1U, linea2);
 }
@@ -476,12 +583,202 @@ static uint8_t dht11_leer(uint8_t *temp, uint8_t *hum)
 }
 
 /* =========================================================
+   MAQUINA DE ESTADOS
+   ========================================================= */
+
+static void revisar_actividad_adc(uint16_t nueva_lectura, uint32_t ahora)
+{
+    uint16_t diferencia;
+
+    if (!referencia_adc_valida) {
+        referencia_adc = nueva_lectura;
+        referencia_adc_valida = 1U;
+        return;
+    }
+
+    diferencia = (nueva_lectura > referencia_adc)
+        ? (uint16_t)(nueva_lectura - referencia_adc)
+        : (uint16_t)(referencia_adc - nueva_lectura);
+
+    if (diferencia >= UMBRAL_ACTIVIDAD_ADC) {
+        referencia_adc = nueva_lectura;
+        ultima_actividad = ahora;
+    }
+}
+
+static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
+{
+    uint8_t sreg;
+
+    alarma_continua = 0U;
+    adc_habilitar();
+    lcd_comando(0x0CU);
+    estado = ESTADO_ACTIVO;
+    PORTB &= (uint8_t)~(1U << LED_PIN);
+
+    if (registrar_actividad) {
+        ultima_actividad = ahora;
+    }
+
+    tarea_adc = 1U;
+    tarea_lcd = 1U;
+
+    /* Al despertar se esperan 2 s antes de volver a leer el DHT11. */
+    sreg = SREG;
+    cli();
+    contador_dht = 0U;
+    tarea_dht = 0U;
+    SREG = sreg;
+}
+
+static void entrar_standby(void)
+{
+    estado = ESTADO_STANDBY;
+    adc_deshabilitar();
+    tarea_dht = 0U;
+    PORTB &= (uint8_t)~(1U << LED_PIN);
+    lcd_comando(0x0CU);
+    lcd_mostrar_standby();
+}
+
+static void entrar_apagado(void)
+{
+    estado = ESTADO_APAGADO;
+    adc_deshabilitar();
+    tarea_dht = 0U;
+    sounder_apagar();
+    PORTB &= (uint8_t)~(1U << LED_PIN);
+    lcd_comando(0x0CU);
+    lcd_mostrar_apagado();
+    _delay_ms(5);
+    lcd_comando(0x08U);
+}
+
+static void entrar_seguro(void)
+{
+    estado = ESTADO_SEGURO;
+    adc_deshabilitar();
+    tarea_dht = 0U;
+    lcd_comando(0x0CU);
+    lcd_mostrar_seguro();
+    alarma_activar();
+}
+
+static void revisar_inactividad(uint32_t ahora)
+{
+    uint32_t inactividad = (uint32_t)(ahora - ultima_actividad);
+
+    if (estado == ESTADO_ACTIVO &&
+        inactividad >= TIEMPO_STANDBY_MS) {
+        entrar_standby();
+    } else if (estado == ESTADO_STANDBY &&
+               inactividad >= TIEMPO_APAGADO_MS) {
+        entrar_apagado();
+    }
+}
+
+static void procesar_boton(uint32_t ahora)
+{
+    if (!evento_boton) {
+        return;
+    }
+
+    evento_boton = 0U;
+
+    if ((uint32_t)(ahora - ultimo_boton) < ANTI_REBOTE_MS) {
+        return;
+    }
+
+    ultimo_boton = ahora;
+
+    if (estado == ESTADO_SEGURO) {
+        sounder_apagar();
+        boton_presionado = 1U;
+        pulsacion_larga_lista = 1U;
+        inicio_boton = ahora;
+        entrar_activo(ahora, 1U);
+        sounder_activar(DURACION_SOUNDER_MS);
+    } else {
+        boton_presionado = 1U;
+        pulsacion_larga_lista = 0U;
+        inicio_boton = ahora;
+
+        if (estado != ESTADO_ACTIVO) {
+            entrar_activo(ahora, 1U);
+        } else {
+            ultima_actividad = ahora;
+        }
+
+        sounder_activar(DURACION_SOUNDER_MS);
+    }
+}
+
+static void revisar_boton_mantenido(uint32_t ahora)
+{
+    uint8_t presionado =
+        ((PIND & (1U << BOTON_PIN)) == 0U) ? 1U : 0U;
+
+    if (boton_presionado && !presionado) {
+        boton_presionado = 0U;
+        pulsacion_larga_lista = 0U;
+    }
+
+    if (boton_presionado && presionado && !pulsacion_larga_lista &&
+        estado != ESTADO_SEGURO &&
+        (uint32_t)(ahora - inicio_boton) >= PULSACION_EMERGENCIA_MS) {
+        pulsacion_larga_lista = 1U;
+        entrar_seguro();
+    }
+}
+
+static void ejecutar_tareas(uint32_t ahora)
+{
+    if (tarea_led) {
+        tarea_led = 0U;
+        PORTB ^= (1U << LED_PIN);
+    }
+
+    if (tarea_adc) {
+        tarea_adc = 0U;
+        valor_adc = adc_leer_a0();
+        revisar_actividad_adc(valor_adc, ahora);
+    }
+
+    if (tarea_dht) {
+        tarea_dht = 0U;
+        dht_valido = dht11_leer(&temperatura, &humedad);
+        tarea_lcd = 1U;
+    }
+
+    if (tarea_lcd) {
+        tarea_lcd = 0U;
+        lcd_mostrar_activo();
+    }
+}
+
+static void descartar_tareas(void)
+{
+    tarea_adc = 0U;
+    tarea_dht = 0U;
+    tarea_lcd = 0U;
+
+    if (tarea_led) {
+        tarea_led = 0U;
+        if (estado == ESTADO_SEGURO) {
+            PORTB ^= (1U << LED_PIN);
+        } else {
+            PORTB &= (uint8_t)~(1U << LED_PIN);
+        }
+    }
+}
+
+/* =========================================================
    PROGRAMA PRINCIPAL
    ========================================================= */
 
 int main(void)
 {
-    uint32_t ultimo_boton = 0UL;
+    uint32_t ahora;
 
     gpio_init();
     adc_init();
@@ -490,45 +787,28 @@ int main(void)
     timer0_init();
     timer1_init();
 
-    /* Primera lectura y primera presentacion sin esperar un periodo entero. */
     valor_adc = adc_leer_a0();
-    lcd_actualizar();
+    referencia_adc = valor_adc;
+    referencia_adc_valida = 1U;
+    ultima_actividad = 0UL;
+    lcd_mostrar_activo();
 
     sei();
 
     while (1) {
-        if (tarea_led) {
-            tarea_led = 0U;
-            PORTB ^= (1U << LED_PIN);
+        ahora = millis_seguro();
+
+        procesar_boton(ahora);
+        revisar_boton_mantenido(ahora);
+
+        if (estado != ESTADO_SEGURO) {
+            revisar_inactividad(ahora);
         }
 
-        if (tarea_adc) {
-            tarea_adc = 0U;
-            valor_adc = adc_leer_a0();
-        }
-
-        if (tarea_dht) {
-            tarea_dht = 0U;
-            dht_valido = dht11_leer(&temperatura, &humedad);
-        }
-
-        if (tarea_lcd) {
-            tarea_lcd = 0U;
-            lcd_actualizar();
-        }
-
-        if (evento_boton) {
-            uint32_t ahora;
-
-            evento_boton = 0U;
-            ahora = millis_seguro();
-
-            /* Antirrebote basico y confirmacion de que sigue presionado. */
-            if ((PIND & (1U << BOTON_PIN)) == 0U &&
-                (uint32_t)(ahora - ultimo_boton) >= 50UL) {
-                ultimo_boton = ahora;
-                sounder_activar(500U);
-            }
+        if (estado == ESTADO_ACTIVO) {
+            ejecutar_tareas(ahora);
+        } else {
+            descartar_tareas();
         }
     }
 }
