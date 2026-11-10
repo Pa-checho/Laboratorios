@@ -1,5 +1,5 @@
 /*
- * LABORATORIO 5 - PROBLEMA B / ACTIVIDADES 1, 2 Y 3
+ * LABORATORIO 5 - PROBLEMA B / ACTIVIDADES 1, 2, 3 Y 4
  * ATmega328P / Arduino Uno - 16 MHz - avr-gcc
  *
  * Arquitectura:
@@ -12,8 +12,8 @@
  * Agregados B1:
  * - STANDBY: IDLE, Timer1 cada 100 ms y contexto conservado en SRAM.
  * - APAGADO: POWER-DOWN, perifericos detenidos y despertar por INT0 bajo.
- * - UART 9600 bps: comandos de prueba ACTIVO, ESTADO y EMERGENCIA + LF.
- * - El protocolo completo de Bluetooth se desarrolla despues.
+ * - UART 9600 bps; sus comandos simples se sustituyen por tramas en B4.
+ * - El protocolo de Bluetooth esta integrado en la Actividad 4.
  *
  * Actividad 2:
  * - PRUEBA 1 ACTIVA: WDT solo interrupcion, 8 s nominales en POWER-DOWN.
@@ -31,8 +31,18 @@
  * - PRR centralizado, mascaras explicitas y comprobacion de lectura posterior.
  * - Se rechaza apagar un reloj necesario o un periferico ocupado.
  * - Timer2 solo se habilita durante la captura de pulsos del DHT11.
- * - UART: PRR + LF consulta el registro; avisos al cambiar de estado.
+ * - UART: trama PRR,? consulta el registro; avisos al cambiar de estado.
  * - El bit reservado 4 nunca se solicita. 1=sin reloj; 0=con reloj.
+ *
+ * Actividad 4:
+ * - UART 9600 8N1, RX/TX por interrupciones y buffers circulares.
+ * - Tramas ASCII: @COMANDO,DATO*HH + LF (CR+LF tambien permitido).
+ * - HH = XOR de los bytes entre @ y *, sin incluir delimitadores.
+ * - Parser, checksum, comandos y respuestas ejecutados SOLO en main.
+ * - Estado/sensores/modos/LED/sounder/emergencia/historial de alarmas.
+ * - SEGURO requiere reconocimiento LOCAL; no se desactiva por Bluetooth.
+ * - Los mensajes anteriores pasan a tramas EVENTO con checksum.
+ * - HC-05 en modo datos: su configuracion y conexion fisicas no verificadas.
  *
  * Pines:
  *   D13 / PB5 -> LED
@@ -58,6 +68,7 @@
 #include <string.h>
 #include <avr/sleep.h>
 #include <avr/wdt.h>
+#include <avr/pgmspace.h>
 
 #if F_CPU != 16000000UL
 #error "Esta version requiere revisar los temporizadores si F_CPU no es 16 MHz"
@@ -96,10 +107,27 @@
 #define PASO_STANDBY_MS                 100UL
 
 #define UART_RX_TAM                     64U
-#define UART_TX_TAM                     128U
-#define UART_LINEA_TAM                  24U
+#define UART_TX_TAM                     256U
+#define UART_LINEA_TAM                  64U
 #define UART_TIMEOUT_LINEA_MS           500UL
 #define UART_UBRR_9600                  103U
+#define PROTO_TRAMA_TAM                 96U
+#define PROTO_RESERVA_TX                192U /* Una orden pendiente, sin bloquear. */
+#define UART_ERR_FRAME                  0x01U
+#define UART_ERR_OVERRUN                0x02U
+#define UART_ERR_PARIDAD                0x04U
+#define UART_ERR_BUFFER                 0x08U
+#define LED_AUTOMATICO                  0U
+#define LED_FORZADO_OFF                 1U
+#define LED_FORZADO_ON                  2U
+#define ALARMA_LOCAL                    1U
+#define ALARMA_REMOTA                   2U
+#define ALARMA_WDT                      3U
+#define ALARMA_TRAS_BLOQUEO              4U
+#define ALARMAS_TAM                     4U
+#define ES(texto, literal) (strcmp_P((texto), PSTR(literal)) == 0)
+#define COPIAR(destino, literal) strcpy_P((destino), PSTR(literal))
+#define ERROR_PROTO(literal) protocolo_error(PSTR(literal))
 
 /* ACTIVIDAD 3: bits definidos del ATmega328P. Nunca usar PRR=0xFF. */
 #define PRR_ADC        _BV(PRADC)       /* 0x01 */
@@ -219,6 +247,29 @@ static uint8_t uart_linea_longitud = 0U;
 static uint8_t uart_descartar_linea = 0U;
 static uint32_t uart_inicio_linea = 0UL;
 
+/* Actividad 4: parser y diagnostico. No se usa memoria dinamica. */
+static uint8_t uart_en_trama = 0U;
+static uint8_t uart_cr_recibido = 0U;
+static uint8_t uart_trama_pendiente = 0U;
+static uint8_t modo_led = LED_AUTOMATICO;
+static uint8_t solicitud_sensores = 0U;
+static uint8_t sensores_listos = 0U;
+static uint8_t dht_intento_previo = 0U;
+static uint32_t dht_ultimo_inicio_ms = 0UL;
+static uint32_t dht_ultima_lectura_ms = 0UL;
+static uint16_t protocolo_aceptadas = 0U;
+static uint16_t protocolo_errores = 0U;
+static uint16_t uart_tx_descartadas = 0U;
+typedef struct {
+    uint32_t numero;
+    uint32_t tiempo;
+    uint8_t causa;
+} alarma_evento_t;
+static alarma_evento_t alarmas[ALARMAS_TAM];
+static uint32_t alarmas_total = 0UL;
+static uint8_t alarmas_cabeza = 0U;
+static uint8_t alarmas_guardadas = 0U;
+
 /* Diagnostico PRR en SRAM; no es una medicion de consumo. */
 static uint8_t twi_fase = TWI_LIBRE;
 static volatile uint8_t prr_ultimo_error = PRR_OK;
@@ -329,9 +380,13 @@ ISR(USART_RX_vect)
     uint8_t dato = UDR0;
     uint8_t siguiente = (uint8_t)((uart_rx_cabeza + 1U) & (UART_RX_TAM - 1U));
 
-    if ((estado_uart & (_BV(FE0) | _BV(DOR0) | _BV(UPE0))) != 0U ||
-        siguiente == uart_rx_cola) {
-        uart_rx_error = 1U;          /* No procesa ni valida comandos en ISR. */
+    uint8_t error = 0U;
+    if ((estado_uart & _BV(FE0)) != 0U) error |= UART_ERR_FRAME;
+    if ((estado_uart & _BV(DOR0)) != 0U) error |= UART_ERR_OVERRUN;
+    if ((estado_uart & _BV(UPE0)) != 0U) error |= UART_ERR_PARIDAD;
+    if (siguiente == uart_rx_cola) error |= UART_ERR_BUFFER;
+    if (error != 0U) {
+        uart_rx_error |= error;     /* No valida ni ejecuta comandos en la ISR. */
     } else {
         uart_rx[uart_rx_cabeza] = dato;
         uart_rx_cabeza = siguiente;
@@ -478,8 +533,8 @@ static void apagar_sonido(void)
 
 
 /* =========================================================
-   UART 9600 8N1 - SOPORTE MINIMO DE PRUEBA PARA LA ACTIVIDAD 1
-   El protocolo de tramas definitivo corresponde a la Actividad 4.
+   ACTIVIDAD 4 - UART 9600 8N1 Y TRANSMISION DE TRAMAS
+   Las ISR solo trasladan bytes. Emisor y parser se ejecutan en main.
    ========================================================= */
 
 static void uart_init(void)
@@ -493,7 +548,7 @@ static void uart_init(void)
     UCSR0B = _BV(RXEN0) | _BV(TXEN0) | _BV(RXCIE0);
 }
 
-static uint8_t uart_enviar_texto(const char *texto)
+static uint8_t uart_enviar_crudo(const char *texto)
 {
     uint8_t longitud = 0U;
     uint8_t cabeza = uart_tx_cabeza;
@@ -506,6 +561,7 @@ static uint8_t uart_enviar_texto(const char *texto)
     }
     libre = (uint8_t)((uart_tx_cola - cabeza - 1U) & (UART_TX_TAM - 1U));
     if (longitud > libre) {
+        uart_tx_descartadas++;
         return 0U;                 /* Sin espera activa si el buffer esta lleno. */
     }
     for (i = 0U; i < longitud; i++) {
@@ -519,6 +575,101 @@ static uint8_t uart_enviar_texto(const char *texto)
     SREG = sreg;
     return 1U;
 }
+
+/* Un solo productor (main) permite construir y publicar una trama completa. */
+static char protocolo_hex(uint8_t valor)
+{
+    valor &= 15U;
+    return valor < 10U ? (char)('0' + valor) : (char)('A' + valor - 10U);
+}
+
+static uint8_t uart_tx_libre(void)
+{
+    return (uint8_t)((uart_tx_cola - uart_tx_cabeza - 1U) & (UART_TX_TAM - 1U));
+}
+
+static uint8_t uart_enviar_trama(const char *comando, const char *dato)
+{
+    char trama[PROTO_TRAMA_TAM];
+    uint8_t n = 0U;
+    uint8_t checksum = 0U;
+    const char *p = comando;
+    trama[n++] = '@';
+    while (*p != '\0') {
+        if (n >= PROTO_TRAMA_TAM - 6U) return 0U;
+        trama[n++] = *p;
+        checksum ^= (uint8_t)*p++;
+    }
+    trama[n++] = ',';
+    checksum ^= ',';
+    p = dato;
+    while (*p != '\0' && *p != '\r' && *p != '\n') {
+        if (n >= PROTO_TRAMA_TAM - 5U || *p == '@' || *p == '*') return 0U;
+        trama[n++] = *p;
+        checksum ^= (uint8_t)*p++;
+    }
+    trama[n++] = '*';
+    trama[n++] = protocolo_hex(checksum >> 4);
+    trama[n++] = protocolo_hex(checksum);
+    trama[n++] = '\n';
+    trama[n] = '\0';
+    return uart_enviar_crudo(trama);
+}
+
+/* Conserva avisos de B1/B2/B3, ahora todos con envoltura y checksum. */
+static uint8_t uart_enviar_texto(const char *texto)
+{
+    return uart_enviar_trama("EVENTO", texto);
+}
+
+static void protocolo_error(const char *motivo_flash)
+{
+    char motivo[32];
+    strcpy_P(motivo, motivo_flash);
+    protocolo_errores++;
+    (void)uart_enviar_trama("ERROR", motivo);
+}
+
+static void texto_agregar_u32(char *texto, uint32_t valor)
+{
+    char digitos[10];
+    uint8_t n = 0U;
+    uint8_t i = (uint8_t)strlen(texto);
+    do {
+        digitos[n++] = (char)('0' + valor % 10UL);
+        valor /= 10UL;
+    } while (valor != 0UL);
+    while (n != 0U) texto[i++] = digitos[--n];
+    texto[i] = '\0';
+}
+
+static const char *nombre_estado(void)
+{
+    if (estado == ESTADO_ACTIVO) return "ACTIVO";
+    if (estado == ESTADO_STANDBY) return "STANDBY";
+    if (estado == ESTADO_APAGADO) return "APAGADO";
+    return "SEGURO";
+}
+
+static void registrar_alarma(uint8_t causa)
+{
+    alarma_evento_t *registro = &alarmas[alarmas_cabeza];
+    alarmas_total++;
+    registro->numero = alarmas_total;
+    registro->tiempo = leer_tiempo(); /* Reloj de firmware: excluye Power-Down. */
+    registro->causa = causa;
+    alarmas_cabeza = (uint8_t)((alarmas_cabeza + 1U) % ALARMAS_TAM);
+    if (alarmas_guardadas < ALARMAS_TAM) alarmas_guardadas++;
+}
+
+static const char *nombre_alarma(uint8_t causa)
+{
+    if (causa == ALARMA_LOCAL) return "LOCAL";
+    if (causa == ALARMA_REMOTA) return "REMOTA";
+    if (causa == ALARMA_WDT) return "WDT";
+    return "TRAS_BLOQUEO";
+}
+
 
 static uint8_t uart_tomar_byte(uint8_t *dato)
 {
@@ -538,15 +689,19 @@ static uint8_t uart_tx_terminada(void)
 
 static void uart_informar_estado(void)
 {
-    if (estado == ESTADO_ACTIVO) {
-        (void)uart_enviar_texto("ESTADO:ACTIVO\r\n");
-    } else if (estado == ESTADO_STANDBY) {
-        (void)uart_enviar_texto("ESTADO:STANDBY\r\n");
-    } else if (estado == ESTADO_APAGADO) {
-        (void)uart_enviar_texto("ESTADO:APAGADO\r\n");
-    } else {
-        (void)uart_enviar_texto("ESTADO:SEGURO\r\n");
+    char respuesta[64];
+    COPIAR(respuesta, "ESTADO;EST=");
+    strcat(respuesta, nombre_estado());
+    strcat_P(respuesta, PSTR(";PRR="));
+    {
+        uint8_t n = (uint8_t)strlen(respuesta);
+        respuesta[n++] = protocolo_hex(PRR >> 4);
+        respuesta[n++] = protocolo_hex(PRR);
+        respuesta[n] = '\0';
     }
+    strcat_P(respuesta, PSTR(";EMERG="));
+    texto_agregar_u32(respuesta, estado == ESTADO_SEGURO ? 1U : 0U);
+    (void)uart_enviar_trama("OK", respuesta);
 }
 
 /* =========================================================
@@ -612,7 +767,8 @@ static uint8_t prr_validar(uint8_t destino)
     if ((nuevos & PRR_USART) != 0U &&
         (estado != ESTADO_APAGADO || !uart_tx_terminada() ||
          uart_rx_cabeza != uart_rx_cola || uart_rx_error ||
-         uart_linea_longitud != 0U || (UCSR0A & _BV(RXC0)) != 0U)) {
+         uart_linea_longitud != 0U || uart_en_trama || uart_trama_pendiente ||
+         (UCSR0A & _BV(RXC0)) != 0U)) {
         return PRR_ERR_UART;
     }
     if ((nuevos & PRR_TWI) != 0U) {
@@ -1194,6 +1350,8 @@ static void dht_comenzar(uint32_t ahora)
     DDRD |= (1U << DDD4);
     PORTD &= (uint8_t)~(1U << DHT_PIN);
     dht_marca_ms = ahora;
+    dht_ultimo_inicio_ms = ahora;
+    dht_intento_previo = 1U;
 }
 
 static void dht_liberar_y_capturar(uint32_t ahora)
@@ -1237,12 +1395,14 @@ static void dht_procesar_resultado(void)
         humedad = datos[0];
         temperatura = datos[2];
         lectura_dht_correcta = 1U;
+        dht_ultima_lectura_ms = leer_tiempo();
         error_dht = 0U;
     } else {
         lectura_dht_correcta = 0U;
         error_dht = 6U;
     }
 
+    if (solicitud_sensores) sensores_listos = 1U;
     bandera_lcd = 1U;
 }
 
@@ -1263,7 +1423,9 @@ static void tarea_dht(uint32_t ahora)
     copia_error = dht_error_isr;
     SREG = sreg;
 
-    if (bandera_dht && copia_estado == DHT_REPOSO) {
+    if (bandera_dht && copia_estado == DHT_REPOSO &&
+        (!dht_intento_previo ||
+         (uint32_t)(ahora - dht_ultimo_inicio_ms) >= PERIODO_DHT_MS)) {
         bandera_dht = 0U;
         dht_comenzar(ahora);
     } else if (copia_estado == DHT_INICIO_BAJO &&
@@ -1275,6 +1437,7 @@ static void tarea_dht(uint32_t ahora)
         lectura_dht_correcta = 0U;
         error_dht = copia_error != 0U ? copia_error : 7U;
         cancelar_dht();
+        if (solicitud_sensores) sensores_listos = 1U;
         bandera_lcd = 1U;
     } else if (copia_estado >= DHT_ESPERA_RESPUESTA_BAJA &&
                copia_estado <= DHT_BIT_ALTO &&
@@ -1282,6 +1445,7 @@ static void tarea_dht(uint32_t ahora)
         lectura_dht_correcta = 0U;
         error_dht = 7U;
         cancelar_dht();
+        if (solicitud_sensores) sensores_listos = 1U;
         bandera_lcd = 1U;
     }
 }
@@ -1400,7 +1564,7 @@ static void dormir_powerdown(void)
     uint8_t prr_anterior;
     uint8_t usart_anterior;
 
-    if (!uart_tx_terminada()) {
+    if (!uart_tx_terminada() || uart_en_trama || uart_trama_pendiente) {
         return;                    /* Termina de enviar el aviso sin bloquear main. */
     }
     sreg = SREG;
@@ -1479,6 +1643,7 @@ static void gestionar_sueno(void)
 
 static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
 {
+    modo_led = LED_AUTOMATICO;
     wdt_al_volver_a_ejecucion();    /* Un usuario puede interrumpir la prueba dormida. */
     alarma_continua = 0U;
     restaurar_para_activo();
@@ -1503,10 +1668,16 @@ static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
 
 static void entrar_standby(void)
 {
+    if (solicitud_sensores) {
+        solicitud_sensores = sensores_listos = 0U;
+        ERROR_PROTO("SENSORES_CANCELADOS");
+    }
+    modo_led = LED_AUTOMATICO;
     estado = ESTADO_STANDBY;
     adc_deshabilitar();
     cancelar_dht();
     PORTB &= (uint8_t)~(1U << LED_PIN);
+    twi_init();                    /* Puede proceder de un despertar APAGADO. */
     lcd_encender_luz();
     lcd_comando(0x0CU);
     mostrar_standby();
@@ -1519,6 +1690,11 @@ static void entrar_standby(void)
 
 static void entrar_apagado(void)
 {
+    if (solicitud_sensores) {
+        solicitud_sensores = sensores_listos = 0U;
+        ERROR_PROTO("SENSORES_CANCELADOS");
+    }
+    modo_led = LED_AUTOMATICO;
     estado = ESTADO_APAGADO;
     adc_deshabilitar();
     cancelar_dht();
@@ -1531,13 +1707,20 @@ static void entrar_apagado(void)
     _delay_ms(5);
     lcd_comando(0x08U);
     lcd_apagar_luz();
+    reloj_standby();               /* Tambien permite ACTIVO -> APAGADO por orden. */
     (void)prr_fijar_perfil(PRR_STANDBY); /* T1 y UART hasta completar los avisos. */
     (void)uart_enviar_texto("EV:APAGADO\r\n");
     prr_informar("PREVIO_SUENO");
 }
 
-static void entrar_seguro(void)
+static void entrar_seguro(uint8_t causa)
 {
+    if (solicitud_sensores) {
+        solicitud_sensores = sensores_listos = 0U;
+        ERROR_PROTO("SENSORES_CANCELADOS");
+    }
+    registrar_alarma(causa);
+    modo_led = LED_AUTOMATICO;
     wdt_al_volver_a_ejecucion();
     restaurar_para_activo();       /* La alarma necesita Timer0 a 1 ms. */
     estado = ESTADO_SEGURO;
@@ -1617,53 +1800,189 @@ static void revisar_boton_mantenido(uint32_t ahora)
         (uint32_t)(ahora - inicio_boton) >=
             PULSACION_EMERGENCIA_MS) {
         pulsacion_larga_lista = 1U;
-        entrar_seguro();
+        entrar_seguro(ALARMA_LOCAL);
     }
 }
 
 
 /* =========================================================
-   COMANDOS MINIMOS DE PRUEBA - PROCESAMIENTO FUERA DE LAS ISR
-   Una linea valida es actividad; bytes sueltos/errores no lo son.
+   ACTIVIDAD 4 - PARSER Y COMANDOS, TODO FUERA DE LAS ISR
+   @COMANDO,DATO*HH + LF; XOR de COMANDO,DATO; CR opcional antes de LF.
+   Maximo 63 caracteres entre @ y LF; timeout total de 500 ms.
+   Una trama recibida puede esperar espacio de TX sin bloquear main.
    ========================================================= */
 
-static void uart_ejecutar_linea(uint32_t ahora)
+static void protocolo_actividad(uint8_t activar)
 {
-    if (strcmp(uart_linea, "BLOQUEO") == 0) {
-        if (!wdt_solicitar_bloqueo()) {
-            (void)uart_enviar_texto("ERROR:PRUEBA2_COMENTADA\r\n");
-        }
-    } else if (strcmp(uart_linea, "EMERGENCIA") == 0) {
-        ultima_actividad = ahora;
-        if (estado != ESTADO_SEGURO) {
-            entrar_seguro();
-        }
-        (void)uart_enviar_texto("OK:EMERGENCIA\r\n");
-    } else if (strcmp(uart_linea, "ACTIVO") == 0 ||
-               strcmp(uart_linea, "ESTADO") == 0 ||
-               strcmp(uart_linea, "PRR") == 0) {
-        if (estado == ESTADO_SEGURO) {
-            if (strcmp(uart_linea, "PRR") == 0) {
-                prr_informar("SEGURO");
-            } else if (strcmp(uart_linea, "ESTADO") == 0) {
-                uart_informar_estado();
-            } else {
-                (void)uart_enviar_texto("BLOQUEADO:EMERGENCIA\r\n");
-            }
-        } else {
-            if (estado != ESTADO_ACTIVO) {
-                entrar_activo(ahora, 1U);
-            }
-            ultima_actividad = leer_tiempo();
-            if (strcmp(uart_linea, "PRR") == 0) {
-                prr_informar("ACTUAL");
-            } else {
-                uart_informar_estado();
-            }
-        }
-    } else {
-        (void)uart_enviar_texto("ERROR:COMANDO\r\n");
+    protocolo_aceptadas++;
+    if (activar && estado != ESTADO_ACTIVO && estado != ESTADO_SEGURO) {
+        entrar_activo(leer_tiempo(), 1U);
     }
+    ultima_actividad = leer_tiempo();
+}
+
+static void protocolo_datos_sensores(char *respuesta)
+{
+    COPIAR(respuesta, "ADC=");
+    texto_agregar_u32(respuesta, valor_adc_actual);
+    strcat_P(respuesta, PSTR(";T="));
+    if (lectura_dht_correcta) texto_agregar_u32(respuesta, temperatura);
+    else strcat_P(respuesta, PSTR("NA"));
+    strcat_P(respuesta, PSTR(";H="));
+    if (lectura_dht_correcta) texto_agregar_u32(respuesta, humedad);
+    else strcat_P(respuesta, PSTR("NA"));
+    strcat_P(respuesta, PSTR(";DHT="));
+    texto_agregar_u32(respuesta, lectura_dht_correcta);
+    strcat_P(respuesta, PSTR(";EDAD_MS="));
+    if (lectura_dht_correcta) texto_agregar_u32(respuesta,
+                      (uint32_t)(leer_tiempo() - dht_ultima_lectura_ms));
+    else strcat_P(respuesta, PSTR("NA"));
+    strcat_P(respuesta, PSTR(";ERR="));
+    texto_agregar_u32(respuesta, error_dht);
+}
+
+static void protocolo_notificar_sensores(void)
+{
+    char respuesta[80];
+    if (solicitud_sensores && sensores_listos &&
+        uart_tx_libre() >= PROTO_TRAMA_TAM) {
+        protocolo_datos_sensores(respuesta);
+        if (uart_enviar_trama("SENSORES", respuesta)) {
+            solicitud_sensores = sensores_listos = 0U;
+        }
+    }
+}
+
+static void protocolo_comando(const char *comando, const char *dato)
+{
+    char respuesta[80];
+    if (ES(comando, "ESTADO")) {
+        if (!ES(dato, "?")) { ERROR_PROTO("DATO"); return; }
+        protocolo_actividad(1U);
+        uart_informar_estado();
+    } else if (ES(comando, "SENSORES")) {
+        if (!ES(dato, "?")) { ERROR_PROTO("DATO"); return; }
+        if (estado == ESTADO_SEGURO) { ERROR_PROTO("SEGURO"); return; }
+        protocolo_actividad(1U);
+        valor_adc_actual = adc_leer_a0();
+        solicitud_sensores = 1U;
+        sensores_listos = 0U;
+        bandera_dht = 1U;           /* La FSM respeta >=2 s entre intentos DHT. */
+        (void)uart_enviar_trama("OK", "SENSORES;PENDIENTE");
+    } else if (ES(comando, "MODO")) {
+        uint8_t destino;
+        if (ES(dato, "ACTIVO")) destino = ESTADO_ACTIVO;
+        else if (ES(dato, "STANDBY")) destino = ESTADO_STANDBY;
+        else if (ES(dato, "APAGADO")) destino = ESTADO_APAGADO;
+        else { ERROR_PROTO("DATO"); return; }
+        if (estado == ESTADO_SEGURO) { ERROR_PROTO("SEGURO"); return; }
+        protocolo_actividad(0U);
+        if (estado != destino) {
+            if (destino == ESTADO_ACTIVO) entrar_activo(leer_tiempo(), 1U);
+            else if (destino == ESTADO_STANDBY) entrar_standby();
+            else entrar_apagado();
+        }
+        COPIAR(respuesta, "MODO;");
+        strcat(respuesta, nombre_estado());
+        (void)uart_enviar_trama("OK", respuesta);
+    } else if (ES(comando, "LED")) {
+        uint8_t ajuste;
+        if (ES(dato, "0")) ajuste = LED_FORZADO_OFF;
+        else if (ES(dato, "1")) ajuste = LED_FORZADO_ON;
+        else if (ES(dato, "AUTO")) ajuste = LED_AUTOMATICO;
+        else { ERROR_PROTO("DATO"); return; }
+        if (estado == ESTADO_SEGURO) { ERROR_PROTO("SEGURO"); return; }
+        protocolo_actividad(1U);
+        modo_led = ajuste;
+        if (ajuste == LED_FORZADO_OFF) PORTB &= (uint8_t)~_BV(LED_PIN);
+        else if (ajuste == LED_FORZADO_ON) PORTB |= _BV(LED_PIN);
+        COPIAR(respuesta, "LED;"); strcat(respuesta, dato);
+        (void)uart_enviar_trama("OK", respuesta);
+    } else if (ES(comando, "SONIDO")) {
+        if (!ES(dato, "0") && !ES(dato, "1")) { ERROR_PROTO("DATO"); return; }
+        if (estado == ESTADO_SEGURO) { ERROR_PROTO("SEGURO"); return; }
+        protocolo_actividad(1U);
+        if (ES(dato, "1")) iniciar_sonido(DURACION_SOUNDER_MS);
+        else apagar_sonido();
+        COPIAR(respuesta, "SONIDO;"); strcat(respuesta, dato);
+        (void)uart_enviar_trama("OK", respuesta);
+    } else if (ES(comando, "EMERGENCIA")) {
+        if (!ES(dato, "1")) { ERROR_PROTO("DATO"); return; }
+        protocolo_actividad(0U);
+        if (estado != ESTADO_SEGURO) entrar_seguro(ALARMA_REMOTA);
+        (void)uart_enviar_trama("OK", "EMERGENCIA;SEGURO");
+    } else if (ES(comando, "ALARMAS")) {
+        if (ES(dato, "?")) {
+            protocolo_actividad(1U);
+            COPIAR(respuesta, "ALARMAS;TOTAL=");
+            texto_agregar_u32(respuesta, alarmas_total);
+            strcat_P(respuesta, PSTR(";GUARDADAS="));
+            texto_agregar_u32(respuesta, alarmas_guardadas);
+            strcat_P(respuesta, PSTR(";ACTIVA="));
+            texto_agregar_u32(respuesta, estado == ESTADO_SEGURO ? 1U : 0U);
+        } else if (dato[0] >= '0' && dato[0] <= '3' && dato[1] == '\0') {
+            uint8_t indice = (uint8_t)(dato[0] - '0');
+            const alarma_evento_t *registro;
+            if (indice >= alarmas_guardadas) { ERROR_PROTO("SIN_EVENTO"); return; }
+            protocolo_actividad(1U);
+            indice = (uint8_t)((alarmas_cabeza + ALARMAS_TAM - 1U - indice) % ALARMAS_TAM);
+            registro = &alarmas[indice];
+            COPIAR(respuesta, "ALARMA;ID="); texto_agregar_u32(respuesta, registro->numero);
+            strcat_P(respuesta, PSTR(";CAUSA=")); strcat(respuesta, nombre_alarma(registro->causa));
+            strcat_P(respuesta, PSTR(";MS_RELOJ=")); texto_agregar_u32(respuesta, registro->tiempo);
+        } else { ERROR_PROTO("DATO"); return; }
+        (void)uart_enviar_trama("OK", respuesta);
+    } else if (ES(comando, "PRR")) {
+        if (!ES(dato, "?")) { ERROR_PROTO("DATO"); return; }
+        protocolo_actividad(1U);
+        prr_informar("ACTUAL");
+    } else if (ES(comando, "BLOQUEO")) {
+        if (!ES(dato, "1")) { ERROR_PROTO("DATO"); return; }
+        if (estado == ESTADO_SEGURO) { ERROR_PROTO("SEGURO"); return; }
+        if (!wdt_solicitar_bloqueo()) ERROR_PROTO("PRUEBA2_COMENTADA");
+    } else {
+        ERROR_PROTO("COMANDO");
+    }
+}
+
+static uint8_t protocolo_desde_hex(char c)
+{
+    if (c >= '0' && c <= '9') return (uint8_t)(c - '0');
+    if (c >= 'A' && c <= 'F') return (uint8_t)(c - 'A' + 10);
+    if (c >= 'a' && c <= 'f') return (uint8_t)(c - 'a' + 10);
+    return 0xFFU;
+}
+
+static void uart_ejecutar_linea(void)
+{
+    uint8_t i;
+    uint8_t calculado = 0U;
+    uint8_t alto;
+    uint8_t bajo;
+    char *asterisco = strchr(uart_linea, '*');
+    char *coma = strchr(uart_linea, ',');
+    /* Validar forma y checksum completos ANTES de modificar cualquier estado. */
+    if (!asterisco || !coma || coma == uart_linea || coma >= asterisco ||
+        coma + 1 == asterisco || (uint8_t)(asterisco - uart_linea) + 3U != uart_linea_longitud) {
+        ERROR_PROTO("FORMATO"); return;
+    }
+    alto = protocolo_desde_hex(asterisco[1]);
+    bajo = protocolo_desde_hex(asterisco[2]);
+    if (alto == 0xFFU || bajo == 0xFFU) { ERROR_PROTO("FORMATO"); return; }
+    for (i = 0U; &uart_linea[i] < asterisco; i++) calculado ^= (uint8_t)uart_linea[i];
+    if (calculado != (uint8_t)((alto << 4) | bajo)) { ERROR_PROTO("CHECKSUM"); return; }
+    *asterisco = '\0';
+    *coma = '\0';
+    protocolo_comando(uart_linea, coma + 1);
+}
+
+static void protocolo_reiniciar_rx(void)
+{
+    uart_en_trama = 0U;
+    uart_cr_recibido = 0U;
+    uart_trama_pendiente = 0U;
+    uart_linea_longitud = 0U;
+    uart_descartar_linea = 0U;
 }
 
 static void procesar_uart(uint32_t ahora)
@@ -1672,48 +1991,60 @@ static void procesar_uart(uint32_t ahora)
     uint8_t cantidad;
     uint8_t sreg = SREG;
     uint8_t error;
-
     cli();
     error = uart_rx_error;
     uart_rx_error = 0U;
+    if (error) uart_rx_cola = uart_rx_cabeza; /* No unir datos a ambos lados de una perdida. */
     SREG = sreg;
     if (error) {
-        uart_linea_longitud = 0U;
-        uart_descartar_linea = 1U;
-        (void)uart_enviar_texto("ERROR:RX\r\n");
+        char motivo[8] = "RX_00";
+        protocolo_reiniciar_rx();
+        motivo[3] = protocolo_hex(error >> 4);
+        motivo[4] = protocolo_hex(error);
+        protocolo_errores++;
+        (void)uart_enviar_trama("ERROR", motivo);
     }
-    if (uart_linea_longitud != 0U &&
-        (uint32_t)(ahora - uart_inicio_linea) >= UART_TIMEOUT_LINEA_MS) {
-        uart_linea_longitud = 0U;
-        uart_descartar_linea = 1U;   /* Descarta hasta LF: evita aceptar un sufijo. */
-        (void)uart_enviar_texto("ERROR:TIMEOUT\r\n");
+    if (uart_en_trama && (uint32_t)(ahora - uart_inicio_linea) >= UART_TIMEOUT_LINEA_MS) {
+        protocolo_reiniciar_rx();
+        ERROR_PROTO("TIMEOUT");
     }
-
-    for (cantidad = 0U; cantidad < UART_RX_TAM && uart_tomar_byte(&dato); cantidad++) {
-        if (dato == '\r') {
-            continue;
+    for (cantidad = 0U; cantidad < UART_RX_TAM; cantidad++) {
+        if (uart_trama_pendiente) {
+            if (uart_tx_libre() < PROTO_RESERVA_TX) return;
+            uart_linea[uart_linea_longitud] = '\0';
+            uart_ejecutar_linea();
+            protocolo_reiniciar_rx();
         }
-        if (dato == '\n') {
-            if (!uart_descartar_linea && uart_linea_longitud != 0U) {
-                uart_linea[uart_linea_longitud] = '\0';
-                uart_ejecutar_linea(leer_tiempo());
+        if (!uart_tomar_byte(&dato)) return;
+        if (dato == '@') {
+            if (uart_en_trama) ERROR_PROTO("SIN_FIN");
+            protocolo_reiniciar_rx();
+            uart_en_trama = 1U;
+            uart_inicio_linea = leer_tiempo();
+        } else if (dato == '\n') {
+            if (uart_en_trama) {
+                uart_en_trama = 0U;
+                uart_trama_pendiente = 1U;
+            } else if (uart_descartar_linea) {
+                uart_descartar_linea = 0U;
+                ERROR_PROTO("INICIO");
             }
-            uart_linea_longitud = 0U;
-            uart_descartar_linea = 0U;
-        } else if (!uart_descartar_linea) {
-            if (uart_linea_longitud < UART_LINEA_TAM - 1U) {
-                if (uart_linea_longitud == 0U) {
-                    uart_inicio_linea = leer_tiempo();
-                }
-                uart_linea[uart_linea_longitud++] = (char)dato;
-            } else {
-                uart_linea_longitud = 0U;
-                uart_descartar_linea = 1U;
-                (void)uart_enviar_texto("ERROR:LONGITUD\r\n");
-            }
+        } else if (!uart_en_trama) {
+            if (dato != '\r') uart_descartar_linea = 1U;
+        } else if (dato == '\r' && !uart_cr_recibido) {
+            uart_cr_recibido = 1U;   /* Solamente se admite como ultimo byte antes de LF. */
+        } else if (uart_cr_recibido || dato < 0x20U || dato > 0x7EU) {
+            protocolo_reiniciar_rx();
+            ERROR_PROTO("CARACTER");
+        } else if (uart_linea_longitud >= UART_LINEA_TAM - 1U) {
+            protocolo_reiniciar_rx();
+            ERROR_PROTO("LONGITUD");
+        } else {
+            uart_linea[uart_linea_longitud++] = (char)dato;
         }
     }
 }
+
 
 /* =========================================================
    TAREAS COOPERATIVAS
@@ -1723,7 +2054,7 @@ static void ejecutar_tareas(uint32_t ahora)
 {
     if (bandera_led) {
         bandera_led = 0U;
-        PORTB ^= (1U << LED_PIN);
+        if (modo_led == LED_AUTOMATICO) PORTB ^= (1U << LED_PIN);
     }
 
     if (bandera_adc) {
@@ -1932,6 +2263,7 @@ static void wdt_supervisar_ciclo(void)
 
 static uint8_t wdt_solicitar_bloqueo(void)
 {
+    protocolo_actividad(0U);
     (void)uart_enviar_texto("PRUEBA2:BLOQUEO_SIN_WDR\r\n");
     marca_bloqueo = MARCA_BLOQUEO_WDT;
     marca_bloqueo_inversa = ~MARCA_BLOQUEO_WDT;
@@ -1965,7 +2297,7 @@ int main(void)
 
         linea_limpiar(mensaje1);
         linea_limpiar(mensaje2);
-        linea_texto(mensaje1, 0U, "LAB 5 - B PRR");
+        linea_texto(mensaje1, 0U, "LAB 5 - B UART");
         linea_texto(mensaje2, 0U, "INICIANDO...");
         lcd_linea(0U, mensaje1);
         lcd_linea(1U, mensaje2);
@@ -1980,12 +2312,13 @@ int main(void)
     referencia_adc_valida = 1U;
     ultima_actividad = 0UL;
     uart_init();
-    (void)uart_enviar_texto("LAB5:B3\r\n");
+    (void)uart_enviar_texto("LAB5:B4\r\n");
     if ((causa_reinicio & _BV(WDRF)) != 0U ||
         (((causa_reinicio & _BV(PORF)) == 0U) &&
          marca_bloqueo == MARCA_BLOQUEO_WDT &&
          marca_bloqueo_inversa == ~MARCA_BLOQUEO_WDT)) {
-        entrar_seguro();           /* Tras WDT, no habilitar funcionamiento normal. */
+        entrar_seguro((causa_reinicio & _BV(WDRF)) != 0U ?
+                      ALARMA_WDT : ALARMA_TRAS_BLOQUEO);
         if ((causa_reinicio & _BV(WDRF)) != 0U) {
             (void)uart_enviar_texto("RESET:WDT\r\n");
         } else {
@@ -2031,6 +2364,7 @@ int main(void)
         } else {
             descartar_tareas();
         }
+        protocolo_notificar_sensores();
         wdt_procesar_evento();     /* Lectura/registro fuera de la ISR. */
         wdt_supervisar_ciclo();    /* Solo la prueba 2 habilitada ejecuta WDR aqui. */
         gestionar_sueno();         /* Solo duerme en STANDBY o APAGADO. */
