@@ -1,5 +1,5 @@
 /*
- * LABORATORIO 5 - PROBLEMA B / ACTIVIDAD 1
+ * LABORATORIO 5 - PROBLEMA B / ACTIVIDADES 1 Y 2
  * ATmega328P / Arduino Uno - 16 MHz - avr-gcc
  *
  * Arquitectura:
@@ -13,7 +13,18 @@
  * - STANDBY: IDLE, Timer1 cada 100 ms y contexto conservado en SRAM.
  * - APAGADO: POWER-DOWN, perifericos detenidos y despertar por INT0 bajo.
  * - UART 9600 bps: comandos de prueba ACTIVO, ESTADO y EMERGENCIA + LF.
- * - El protocolo completo de Bluetooth y el WDT se desarrollan despues.
+ * - El protocolo completo de Bluetooth se desarrolla despues.
+ *
+ * Actividad 2:
+ * - PRUEBA 1 ACTIVA: WDT solo interrupcion, 8 s nominales en POWER-DOWN.
+ * - Tras despertar: registrar evento, leer ADC A0 y volver a dormir.
+ * - PRUEBA 2 COMENTADA: WDT reset a 2 s y bloqueo por comando BLOQUEO.
+ * - Seleccion MANUAL: comentar COMPLETA la PRUEBA 1 y descomentar
+ *   COMPLETA la PRUEBA 2; recompilar despues del cambio.
+ * - Para comentar PRUEBA 1, sustituir sus marcadores // de inicio/fin
+ *   por una apertura y cierre de comentario de bloque (ver guia).
+ * - D12/PB4 genera un pulso por WDT; medir entre flancos ascendentes.
+ * - tiempo_ms NO mide el tiempo dormido ni se le suman 8000 ms inventados.
  * - Se conserva la FSM original, incluido ESTADO_SEGURO.
  *
  * Pines:
@@ -39,6 +50,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
 
 #if F_CPU != 16000000UL
 #error "Esta version requiere revisar los temporizadores si F_CPU no es 16 MHz"
@@ -48,6 +60,7 @@
 #define SOUNDER_PIN                     PB3
 #define DHT_PIN                         PD4
 #define BOTON_PIN                       PD2
+#define WDT_PRUEBA_PIN                  PB4 /* D12: marca observable del WDT. */
 
 #define LCD_RS                          0x01U
 #define LCD_E                           0x04U
@@ -172,6 +185,37 @@ static uint8_t uart_linea_longitud = 0U;
 static uint8_t uart_descartar_linea = 0U;
 static uint32_t uart_inicio_linea = 0UL;
 
+/* Causa de reset: .noinit evita que la inicializacion de C borre esta copia. */
+uint8_t causa_reinicio __attribute__((section(".noinit")));
+/* Solo indica que habia un bloqueo de ensayo pendiente; NO prueba su causa. */
+uint32_t marca_bloqueo __attribute__((section(".noinit")));
+uint32_t marca_bloqueo_inversa __attribute__((section(".noinit")));
+#define MARCA_BLOQUEO_WDT 0x57445432UL
+static volatile uint8_t bandera_wdt = 0U;
+static volatile uint32_t eventos_wdt = 0UL;
+static uint8_t wdt_armado = 0U;
+
+/* Interfaces de las pruebas; sus implementaciones se seleccionan al final. */
+static void wdt_iniciar_prueba(void);
+static void wdt_antes_powerdown(void);
+static void wdt_despues_powerdown(void);
+static void wdt_al_volver_a_ejecucion(void);
+static void wdt_procesar_evento(void);
+static void wdt_supervisar_ciclo(void);
+static uint8_t wdt_solicitar_bloqueo(void);
+
+/* Antes de .data/.bss: guardar MCUSR y detener el WDT que persista tras reset. */
+void wdt_capturar_reset_temprano(void)
+    __attribute__((naked, used, section(".init3")));
+
+void wdt_capturar_reset_temprano(void)
+{
+    causa_reinicio = MCUSR;
+    MCUSR = 0U;                    /* Limpiar WDRF ANTES de deshabilitar WDT. */
+    wdt_disable();                 /* La macro respeta la secuencia protegida. */
+    /* Sin return: .init3 continua con la inicializacion normal de C. */
+}
+
 /* =========================================================
    INTERRUPCIONES
    ========================================================= */
@@ -218,6 +262,13 @@ ISR(TIMER1_COMPA_vect)
     } else if (modo_reloj == RELOJ_RAPIDO) {
         bandera_adc = 1U;             /* Funcion original de A en ACTIVO. */
     }
+}
+
+ISR(WDT_vect)
+{
+    bandera_wdt = 1U;              /* Solo notifica; ADC y UART se atienden en main. */
+    eventos_wdt++;
+    PORTB |= _BV(WDT_PRUEBA_PIN);   /* Inicio de pulso para osciloscopio. */
 }
 
 ISR(INT0_vect)
@@ -464,8 +515,8 @@ static void gpio_init(void)
     ACSR = _BV(ACD);                /* Comparador analogico no usado. */
     PRR |= _BV(PRSPI);              /* SPI no se usa en esta aplicacion. */
     DIDR0 |= _BV(ADC0D);            /* Evita entrada digital innecesaria en A0. */
-    DDRB |= (1U << DDB5) | (1U << DDB3);
-    PORTB &= (uint8_t)~((1U << LED_PIN) | (1U << SOUNDER_PIN));
+    DDRB |= _BV(DDB5) | _BV(DDB3) | _BV(DDB4);
+    PORTB &= (uint8_t)~(_BV(LED_PIN) | _BV(SOUNDER_PIN) | _BV(WDT_PRUEBA_PIN));
 
     DDRD &= (uint8_t)~(1U << DDD4);
     PORTD |= (1U << DHT_PIN);
@@ -1117,7 +1168,7 @@ static void int0_flanco_descendente(void)
 /* Esta comprobacion se llama con IRQ deshabilitadas. */
 static uint8_t hay_evento_pendiente(void)
 {
-    return (bandera_boton || bandera_reloj || uart_rx_error ||
+    return (bandera_boton || bandera_reloj || bandera_wdt || uart_rx_error ||
             uart_rx_cola != uart_rx_cabeza || (UCSR0A & _BV(RXC0)) != 0U ||
             (PIND & _BV(BOTON_PIN)) == 0U) ? 1U : 0U;
 }
@@ -1166,6 +1217,7 @@ static void dormir_powerdown(void)
         return;
     }
 
+    wdt_antes_powerdown();         /* Prueba 1 arma IRQ; prueba 2 pausa supervision. */
     prr_anterior = PRR;
     usart_anterior = UCSR0B;
     reloj_capturar_y_detener();
@@ -1191,6 +1243,7 @@ static void dormir_powerdown(void)
     PRR = prr_anterior;
     UCSR0B = usart_anterior;
     reloj_standby();               /* Reloj disponible antes de validar el evento. */
+    wdt_despues_powerdown();
     en_powerdown = 0U;
     int0_flanco_descendente();
     SREG = sreg;
@@ -1213,6 +1266,7 @@ static void gestionar_sueno(void)
 
 static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
 {
+    wdt_al_volver_a_ejecucion();    /* Un usuario puede interrumpir la prueba dormida. */
     alarma_continua = 0U;
     restaurar_para_activo();
     lcd_encender_luz();
@@ -1267,6 +1321,7 @@ static void entrar_apagado(void)
 
 static void entrar_seguro(void)
 {
+    wdt_al_volver_a_ejecucion();
     restaurar_para_activo();       /* La alarma necesita Timer0 a 1 ms. */
     estado = ESTADO_SEGURO;
     adc_deshabilitar();
@@ -1355,7 +1410,11 @@ static void revisar_boton_mantenido(uint32_t ahora)
 
 static void uart_ejecutar_linea(uint32_t ahora)
 {
-    if (strcmp(uart_linea, "EMERGENCIA") == 0) {
+    if (strcmp(uart_linea, "BLOQUEO") == 0) {
+        if (!wdt_solicitar_bloqueo()) {
+            (void)uart_enviar_texto("ERROR:PRUEBA2_COMENTADA\r\n");
+        }
+    } else if (strcmp(uart_linea, "EMERGENCIA") == 0) {
         ultima_actividad = ahora;
         if (estado != ESTADO_SEGURO) {
             entrar_seguro();
@@ -1472,6 +1531,194 @@ static void descartar_tareas(void)
     }
 }
 
+
+/* =========================================================
+   ACTIVIDAD 2 - SELECCION MANUAL MEDIANTE COMENTARIOS
+   Entrega: PRUEBA 1 activa y PRUEBA 2 comentada.
+   Para cambiar: comentar COMPLETA la prueba activa y descomentar la otra.
+   No hay selector automatico ni #define para deshabilitar la otra prueba.
+   ========================================================= */
+
+// PRUEBA_1_DESPERTAR_INICIO
+// PRUEBA 1 ACTIVA: WDT SOLO INTERRUPCION, INTERVALO NOMINAL DE 8 S.
+
+static void wdt_configurar_interrupcion_8s(void)
+{
+    uint8_t sreg = SREG;
+    uint8_t permiso = _BV(WDCE) | _BV(WDE);
+    uint8_t ajuste = _BV(WDIF) | _BV(WDIE) | _BV(WDP3) | _BV(WDP0);
+
+    cli();
+    wdt_reset();
+    MCUSR &= (uint8_t)~_BV(WDRF);
+    // Dos STS consecutivos garantizan la ventana protegida de cuatro ciclos.
+    __asm__ __volatile__(
+        "sts %[registro], %[permiso]\n\t"
+        "sts %[registro], %[ajuste]\n\t"
+        :
+        : [registro] "n" (_SFR_MEM_ADDR(WDTCSR)),
+          [permiso] "r" (permiso), [ajuste] "r" (ajuste)
+        : "memory"
+    );
+    // WDIF se limpia escribiendo 1; WDE queda en 0, WDIE en 1.
+    wdt_armado = 1U;
+    SREG = sreg;
+}
+
+static uint8_t agregar_numero_u32(char *texto, uint8_t posicion, uint32_t numero)
+{
+    char inverso[10];
+    uint8_t cantidad = 0U;
+    do {
+        inverso[cantidad++] = (char)('0' + (numero % 10UL));
+        numero /= 10UL;
+    } while (numero != 0UL);
+    while (cantidad != 0U) {
+        texto[posicion++] = inverso[--cantidad];
+    }
+    texto[posicion] = '\0';
+    return posicion;
+}
+
+static void wdt_iniciar_prueba(void)
+{
+    wdt_disable();
+    wdt_armado = 0U;
+    bandera_wdt = 0U;
+    (void)uart_enviar_texto("PRUEBA1:IRQ_8S\r\n");
+    // Se arma al entrar realmente en Power-Down, no durante ACTIVO.
+}
+
+static void wdt_antes_powerdown(void)
+{
+    if (!wdt_armado) {
+        wdt_configurar_interrupcion_8s();
+    }
+    // No reiniciar el contador en cada vuelta: el intervalo sigue corriendo.
+}
+
+static void wdt_despues_powerdown(void)
+{
+    // WDE=0: continua como interrupcion periodica, sin reiniciar el sistema.
+}
+
+static void wdt_al_volver_a_ejecucion(void)
+{
+    wdt_disable();
+    wdt_armado = 0U;
+    bandera_wdt = 0U;
+    PORTB &= (uint8_t)~_BV(WDT_PRUEBA_PIN);
+}
+
+static void wdt_procesar_evento(void)
+{
+    uint8_t pendiente;
+    uint8_t sreg = SREG;
+    uint32_t numero_evento;
+    uint8_t posicion;
+    char mensaje[64];
+
+    cli();
+    pendiente = bandera_wdt;
+    bandera_wdt = 0U;
+    numero_evento = eventos_wdt;
+    SREG = sreg;
+    if (!pendiente) {
+        return;
+    }
+    if (estado != ESTADO_APAGADO) {
+        PORTB &= (uint8_t)~_BV(WDT_PRUEBA_PIN);
+        return;                    // La pulsacion/emergencia tiene prioridad.
+    }
+
+    // La CPU YA desperto: habilitar PRADC/ADEN antes de adquirir A0.
+    adc_habilitar();
+    valor_adc_actual = adc_leer_a0();
+    adc_deshabilitar();
+    PRR |= _BV(PRADC);
+    PORTB &= (uint8_t)~_BV(WDT_PRUEBA_PIN); // Fin del trabajo de lectura.
+
+    strcpy(mensaje, "WDT,evento=");
+    posicion = agregar_numero_u32(mensaje, (uint8_t)strlen(mensaje), numero_evento);
+    strcpy(&mensaje[posicion], ",ADC=");
+    posicion = agregar_numero_u32(mensaje, (uint8_t)strlen(mensaje), valor_adc_actual);
+    strcpy(&mensaje[posicion], ",nominal_ms=8000\r\n");
+    (void)uart_enviar_texto(mensaje);
+    // No cambiar estado, ultima_actividad ni inventar tiempo transcurrido.
+    // main termina TX y vuelve a Power-Down mediante gestionar_sueno().
+}
+
+static void wdt_supervisar_ciclo(void)
+{
+    // La prueba 1 NO supervisa bloqueos y no reinicia el contador en main.
+}
+
+static uint8_t wdt_solicitar_bloqueo(void)
+{
+    return 0U;                     // La prueba de reset sigue comentada.
+}
+// PRUEBA_1_DESPERTAR_FIN
+
+/* PRUEBA_2_RESET_COMENTADA_INICIO
+
+// PRUEBA 2: WDT COMO RECUPERACION, RESET NOMINAL DE 2 SEGUNDOS.
+// Para usar esta prueba: COMENTAR primero la PRUEBA 1 y descomentar esta.
+// La peticion BLOQUEO provoca el bucle infinito SOLO cuando se recibe.
+
+static void wdt_iniciar_prueba(void)
+{
+    wdt_armado = 0U;
+    bandera_wdt = 0U;
+    wdt_reset();
+    wdt_enable(WDTO_2S);            // WDE=1, WDIE=0: reset, sin interrupcion.
+    (void)uart_enviar_texto("PRUEBA2:RESET_2S\r\n");
+}
+
+static void wdt_antes_powerdown(void)
+{
+    // Un sueno intencional no debe confundirse con el bloqueo del programa.
+    // La prueba de recuperacion supervisa ACTIVO, IDLE y SEGURO.
+    wdt_disable();
+}
+
+static void wdt_despues_powerdown(void)
+{
+    wdt_reset();
+    wdt_enable(WDTO_2S);            // Reanuda supervision al volver del sueno.
+}
+
+static void wdt_al_volver_a_ejecucion(void)
+{
+    // Se conserva la supervision: no se atiende el WDT desde ninguna ISR.
+}
+
+static void wdt_procesar_evento(void)
+{
+    // En modo reset no se espera ISR(WDT_vect).
+    bandera_wdt = 0U;
+}
+
+static void wdt_supervisar_ciclo(void)
+{
+    // Solo main lo atiende, DESPUES de completar la iteracion normal.
+    wdt_reset();
+}
+
+static uint8_t wdt_solicitar_bloqueo(void)
+{
+    (void)uart_enviar_texto("PRUEBA2:BLOQUEO_SIN_WDR\r\n");
+    marca_bloqueo = MARCA_BLOQUEO_WDT;
+    marca_bloqueo_inversa = ~MARCA_BLOQUEO_WDT;
+    PORTB |= _BV(WDT_PRUEBA_PIN);   // Marca el comienzo del bloqueo de ensayo.
+    wdt_reset();                   // Comienza un plazo completo de 2 s.
+    for (;;) {
+        // BLOQUEO INTENCIONAL: las ISR pueden seguir, pero main no supervisa.
+        // No colocar wdt_reset() aqui ni en las interrupciones.
+    }
+    return 1U;                     // Inalcanzable; satisface tambien compiladores antiguos.
+}
+PRUEBA_2_RESET_COMENTADA_FIN */
+
 /* =========================================================
    PROGRAMA PRINCIPAL
    ========================================================= */
@@ -1492,7 +1739,7 @@ int main(void)
 
         linea_limpiar(mensaje1);
         linea_limpiar(mensaje2);
-        linea_texto(mensaje1, 0U, "LAB 5 - B ACT 1");
+        linea_texto(mensaje1, 0U, "LAB 5 - B WDT");
         linea_texto(mensaje2, 0U, "INICIANDO...");
         lcd_linea(0U, mensaje1);
         lcd_linea(1U, mensaje2);
@@ -1506,11 +1753,29 @@ int main(void)
     referencia_adc_actividad = valor_adc_actual;
     referencia_adc_valida = 1U;
     ultima_actividad = 0UL;
-    mostrar_activo();
     uart_init();
-    (void)uart_enviar_texto("LAB5:B1\r\nEV:ACTIVO\r\n");
+    (void)uart_enviar_texto("LAB5:B2\r\n");
+    if ((causa_reinicio & _BV(WDRF)) != 0U ||
+        (((causa_reinicio & _BV(PORF)) == 0U) &&
+         marca_bloqueo == MARCA_BLOQUEO_WDT &&
+         marca_bloqueo_inversa == ~MARCA_BLOQUEO_WDT)) {
+        entrar_seguro();           /* Tras WDT, no habilitar funcionamiento normal. */
+        if ((causa_reinicio & _BV(WDRF)) != 0U) {
+            (void)uart_enviar_texto("RESET:WDT\r\n");
+        } else {
+            /* No atribuir causa si el cargador de arranque borro MCUSR. */
+            (void)uart_enviar_texto("RESET:TRAS_BLOQUEO_SIN_WDRF\r\n");
+        }
+        (void)uart_enviar_texto("RECUPERACION:SEGURO\r\n");
+    } else {
+        mostrar_activo();
+        (void)uart_enviar_texto("EV:ACTIVO\r\n");
+    }
+    marca_bloqueo = 0UL;           /* Evita repetir la recuperacion en otro reset. */
+    marca_bloqueo_inversa = 0UL;
 
     sei();
+    wdt_iniciar_prueba();
 
     while (1) {
         /* Consumir tick y copiar tiempo en una sola seccion atomica. */
@@ -1538,6 +1803,8 @@ int main(void)
         } else {
             descartar_tareas();
         }
+        wdt_procesar_evento();     /* Lectura/registro fuera de la ISR. */
+        wdt_supervisar_ciclo();    /* Solo la prueba 2 habilitada ejecuta WDR aqui. */
         gestionar_sueno();         /* Solo duerme en STANDBY o APAGADO. */
     }
 }
