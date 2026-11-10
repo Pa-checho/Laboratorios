@@ -1,5 +1,5 @@
 /*
- * LABORATORIO 5 - PROBLEMA B / ACTIVIDADES 1 Y 2
+ * LABORATORIO 5 - PROBLEMA B / ACTIVIDADES 1, 2 Y 3
  * ATmega328P / Arduino Uno - 16 MHz - avr-gcc
  *
  * Arquitectura:
@@ -26,6 +26,13 @@
  * - D12/PB4 genera un pulso por WDT; medir entre flancos ascendentes.
  * - tiempo_ms NO mide el tiempo dormido ni se le suman 8000 ms inventados.
  * - Se conserva la FSM original, incluido ESTADO_SEGURO.
+ *
+ * Actividad 3:
+ * - PRR centralizado, mascaras explicitas y comprobacion de lectura posterior.
+ * - Se rechaza apagar un reloj necesario o un periferico ocupado.
+ * - Timer2 solo se habilita durante la captura de pulsos del DHT11.
+ * - UART: PRR + LF consulta el registro; avisos al cambiar de estado.
+ * - El bit reservado 4 nunca se solicita. 1=sin reloj; 0=con reloj.
  *
  * Pines:
  *   D13 / PB5 -> LED
@@ -94,9 +101,36 @@
 #define UART_TIMEOUT_LINEA_MS           500UL
 #define UART_UBRR_9600                  103U
 
-/* Solo bits definidos: el bit 4 reservado queda excluido. */
-#define PRR_DORMIR (_BV(PRADC) | _BV(PRUSART0) | _BV(PRSPI) | \
-                    _BV(PRTIM1) | _BV(PRTIM0) | _BV(PRTIM2) | _BV(PRTWI))
+/* ACTIVIDAD 3: bits definidos del ATmega328P. Nunca usar PRR=0xFF. */
+#define PRR_ADC        _BV(PRADC)       /* 0x01 */
+#define PRR_USART      _BV(PRUSART0)    /* 0x02 */
+#define PRR_SPI        _BV(PRSPI)       /* 0x04 */
+#define PRR_TIMER1     _BV(PRTIM1)      /* 0x08 */
+#define PRR_TIMER0     _BV(PRTIM0)      /* 0x20 */
+#define PRR_TIMER2     _BV(PRTIM2)      /* 0x40 */
+#define PRR_TWI        _BV(PRTWI)       /* 0x80 */
+#define PRR_VALIDOS    (PRR_ADC | PRR_USART | PRR_SPI | PRR_TIMER1 | \
+                        PRR_TIMER0 | PRR_TIMER2 | PRR_TWI) /* 0xEF */
+#define PRR_ACTIVO     (PRR_SPI | PRR_TIMER2)             /* 0x44 */
+#define PRR_STANDBY    (PRR_ADC | PRR_SPI | PRR_TIMER0 | PRR_TIMER2 | PRR_TWI)
+                                                       /* 0xE5 */
+#define PRR_SEGURO     (PRR_ADC | PRR_SPI | PRR_TIMER1 | PRR_TIMER2 | PRR_TWI)
+                                                       /* 0xCD */
+#define PRR_DORMIR     PRR_VALIDOS                        /* 0xEF */
+
+#define TWI_LIBRE      0U
+#define TWI_TRANSFIRIENDO 1U
+#define TWI_STOP_PENDIENTE 2U
+/* Diagnostico: ultimo rechazo conservado hasta el siguiente rechazo. */
+#define PRR_OK        0U
+#define PRR_ERR_BIT    1U
+#define PRR_ERR_RELOJ  2U
+#define PRR_ERR_DHT    3U
+#define PRR_ERR_ADC    4U
+#define PRR_ERR_UART   5U
+#define PRR_ERR_TWI    6U
+#define PRR_ERR_SPI    7U
+#define PRR_ERR_LECTURA 8U
 
 /* Timer2: 16 MHz / 8 = 2 MHz, 0,5 us por cuenta. */
 #define DHT_RESPUESTA_MIN_CUENTAS       100U
@@ -184,6 +218,15 @@ static char uart_linea[UART_LINEA_TAM];
 static uint8_t uart_linea_longitud = 0U;
 static uint8_t uart_descartar_linea = 0U;
 static uint32_t uart_inicio_linea = 0UL;
+
+/* Diagnostico PRR en SRAM; no es una medicion de consumo. */
+static uint8_t twi_fase = TWI_LIBRE;
+static volatile uint8_t prr_ultimo_error = PRR_OK;
+static volatile uint16_t prr_rechazos = 0U;
+static volatile uint16_t prr_cambios = 0U;
+static volatile uint8_t prr_ultimo_sueno = 0U;
+/* UART se inicializa antes de la definicion de la interfaz PRR. */
+static void prr_habilitar(uint8_t mascara);
 
 /* Causa de reset: .noinit evita que la inicializacion de C borre esta copia. */
 uint8_t causa_reinicio __attribute__((section(".noinit")));
@@ -441,7 +484,7 @@ static void apagar_sonido(void)
 
 static void uart_init(void)
 {
-    PRR &= (uint8_t)~_BV(PRUSART0);
+    prr_habilitar(_BV(PRUSART0));
     PORTD |= _BV(PD0);              /* RX definido cuando no hay modulo. */
     UCSR0A = 0U;                    /* Velocidad normal, U2X0=0. */
     UBRR0H = 0U;
@@ -507,13 +550,162 @@ static void uart_informar_estado(void)
 }
 
 /* =========================================================
+   ACTIVIDAD 3 - PRR: VALIDAR, DETENER Y DESPUES QUITAR EL RELOJ
+   Todas las escrituras a PRR pasan por estas funciones.
+   Las ISR no cambian PRR. Las comprobaciones y el cambio son atomicos.
+   ========================================================= */
+
+static void prr_registrar_error(uint8_t codigo)
+{
+    prr_ultimo_error = codigo;
+    prr_rechazos++;
+}
+
+/* Solo cambia el registro; el llamador ya verifico y preparo los modulos. */
+static uint8_t prr_escribir(uint8_t valor)
+{
+    valor &= PRR_VALIDOS;
+    if (PRR != valor) {
+        PRR = valor;
+        prr_cambios++;
+    }
+    if (PRR != valor) {
+        prr_registrar_error(PRR_ERR_LECTURA);
+        return 0U;
+    }
+    return 1U;
+}
+
+/* Quitar el bit PRR habilita el RELOJ; el driver configura luego el modulo. */
+static void prr_habilitar(uint8_t mascara)
+{
+    uint8_t sreg = SREG;
+    cli();
+    if ((mascara & (uint8_t)~PRR_VALIDOS) != 0U) {
+        prr_registrar_error(PRR_ERR_BIT);
+    } else {
+        (void)prr_escribir((uint8_t)(PRR & (uint8_t)~mascara));
+    }
+    SREG = sreg;
+}
+
+/* Retorna un motivo de rechazo SIN detener ningun periferico. */
+static uint8_t prr_validar(uint8_t destino)
+{
+    uint8_t nuevos = destino & (uint8_t)~PRR;
+    if ((destino & (uint8_t)~PRR_VALIDOS) != 0U) {
+        return PRR_ERR_BIT;
+    }
+    if (((destino & PRR_TIMER0) != 0U && modo_reloj == RELOJ_RAPIDO) ||
+        ((destino & PRR_TIMER1) != 0U &&
+         (modo_reloj == RELOJ_STANDBY ||
+          (estado == ESTADO_ACTIVO && modo_reloj != RELOJ_DETENIDO)))) {
+        return PRR_ERR_RELOJ;       /* Scheduler/ADC de ACTIVO o reloj de IDLE. */
+    }
+    if ((destino & PRR_TIMER2) != 0U &&
+        estado_dht >= DHT_ESPERA_RESPUESTA_BAJA && estado_dht <= DHT_BIT_ALTO) {
+        return PRR_ERR_DHT;
+    }
+    if ((nuevos & PRR_ADC) != 0U && (ADCSRA & _BV(ADSC)) != 0U) {
+        return PRR_ERR_ADC;
+    }
+    if ((nuevos & PRR_USART) != 0U &&
+        (estado != ESTADO_APAGADO || !uart_tx_terminada() ||
+         uart_rx_cabeza != uart_rx_cola || uart_rx_error ||
+         uart_linea_longitud != 0U || (UCSR0A & _BV(RXC0)) != 0U)) {
+        return PRR_ERR_UART;
+    }
+    if ((nuevos & PRR_TWI) != 0U) {
+        if (twi_fase == TWI_STOP_PENDIENTE && (TWCR & _BV(TWSTO)) == 0U) {
+            twi_fase = TWI_LIBRE;  /* STOP termino despues de su espera limitada. */
+        }
+        if (twi_fase != TWI_LIBRE || (TWCR & _BV(TWSTO)) != 0U) {
+            return PRR_ERR_TWI;
+        }
+    }
+    /* SPI no se usa: si otro desarrollo lo habilita, no apagarlo a ciegas. */
+    if ((nuevos & PRR_SPI) != 0U && (SPCR & _BV(SPE)) != 0U) {
+        return PRR_ERR_SPI;
+    }
+    return PRR_OK;
+}
+
+static uint8_t prr_fijar_perfil(uint8_t destino)
+{
+    uint8_t sreg = SREG;
+    uint8_t nuevos;
+    uint8_t error;
+    uint8_t resultado;
+    cli();
+    error = prr_validar(destino);
+    if (error != PRR_OK) {
+        prr_registrar_error(error);
+        SREG = sreg;
+        return 0U;                 /* Ningun apagado parcial si algo esta ocupado. */
+    }
+    nuevos = destino & (uint8_t)~PRR;
+    /* No acceder a registros de modulos cuyo reloj ya estaba quitado. */
+    if ((nuevos & PRR_ADC) != 0U) ADCSRA &= (uint8_t)~_BV(ADEN);
+    if ((nuevos & PRR_USART) != 0U) UCSR0B = 0U;
+    if ((nuevos & PRR_TIMER0) != 0U) { TCCR0B = 0U; TIMSK0 = 0U; }
+    if ((nuevos & PRR_TIMER1) != 0U) { TCCR1B = _BV(WGM12); TIMSK1 = 0U; }
+    if ((nuevos & PRR_TIMER2) != 0U) { TCCR2B = 0U; TIMSK2 = 0U; }
+    if ((nuevos & PRR_TWI) != 0U) TWCR = 0U;
+    resultado = prr_escribir(destino);
+    SREG = sreg;
+    return resultado;
+}
+
+static uint8_t prr_deshabilitar(uint8_t mascara)
+{
+    /* Validar primero la mascara original: no ocultar un bit reservado. */
+    uint8_t sreg = SREG;
+    uint8_t resultado;
+    cli();
+    resultado = prr_fijar_perfil((uint8_t)(PRR | mascara));
+    SREG = sreg;
+    return resultado;
+}
+
+static char prr_digito_hex(uint8_t valor)
+{
+    valor &= 0x0FU;
+    return valor < 10U ? (char)('0' + valor) : (char)('A' + valor - 10U);
+}
+
+static void prr_informar_valor(const char *etiqueta, uint8_t valor)
+{
+    char mensaje[48];
+    uint8_t i = 4U;
+    strcpy(mensaje, "PRR:");
+    while (*etiqueta != '\0' && i < 30U) mensaje[i++] = *etiqueta++;
+    mensaje[i++] = '=';
+    mensaje[i++] = '0';
+    mensaje[i++] = 'x';
+    mensaje[i++] = prr_digito_hex(valor >> 4);
+    mensaje[i++] = prr_digito_hex(valor);
+    strcpy(&mensaje[i], ",ERR=");
+    i += 5U;
+    mensaje[i++] = prr_digito_hex(prr_ultimo_error);
+    mensaje[i++] = '\r';
+    mensaje[i++] = '\n';
+    mensaje[i] = '\0';
+    (void)uart_enviar_texto(mensaje);
+}
+
+static void prr_informar(const char *etiqueta)
+{
+    prr_informar_valor(etiqueta, PRR);
+}
+
+/* =========================================================
    GPIO Y TEMPORIZADORES
    ========================================================= */
 
 static void gpio_init(void)
 {
     ACSR = _BV(ACD);                /* Comparador analogico no usado. */
-    PRR |= _BV(PRSPI);              /* SPI no se usa en esta aplicacion. */
+    (void)prr_deshabilitar(PRR_SPI);              /* SPI no se usa en esta aplicacion. */
     DIDR0 |= _BV(ADC0D);            /* Evita entrada digital innecesaria en A0. */
     DDRB |= _BV(DDB5) | _BV(DDB3) | _BV(DDB4);
     PORTB &= (uint8_t)~(_BV(LED_PIN) | _BV(SOUNDER_PIN) | _BV(WDT_PRUEBA_PIN));
@@ -533,7 +725,7 @@ static void gpio_init(void)
 
 static void timer0_init(void)
 {
-    PRR &= (uint8_t)~_BV(PRTIM0);
+    prr_habilitar(_BV(PRTIM0));
     TIFR0 = _BV(OCF0A) | _BV(OCF0B) | _BV(TOV0);
     /* 16 MHz / 64 = 250 kHz; 250 cuentas = 1 ms. */
     TCCR0A = (1U << WGM01);
@@ -545,7 +737,7 @@ static void timer0_init(void)
 
 static void timer1_init(void)
 {
-    PRR &= (uint8_t)~_BV(PRTIM1);
+    prr_habilitar(_BV(PRTIM1));
     TIFR1 = _BV(OCF1A) | _BV(OCF1B) | _BV(TOV1);
     /* 16 MHz / 64 = 250 kHz; 25000 cuentas = 100 ms. */
     TCCR1A = 0U;
@@ -557,13 +749,14 @@ static void timer1_init(void)
 
 static void timer2_init(void)
 {
-    PRR &= (uint8_t)~_BV(PRTIM2);
+    prr_habilitar(_BV(PRTIM2));
     /* Modo normal, prescaler 8: 0,5 us por cuenta. */
     TCCR2A = 0U;
-    TCCR2B = (1U << CS21);
+    TCCR2B = 0U;                  /* Se arrancara al liberar el pulso DHT. */
     TCNT2 = 0U;
     TIMSK2 = 0U;
     TIFR2 = (1U << TOV2);
+    (void)prr_deshabilitar(PRR_TIMER2);
 }
 
 /* =========================================================
@@ -572,7 +765,7 @@ static void timer2_init(void)
 
 static void adc_habilitar(void)
 {
-    PRR &= (uint8_t)~_BV(PRADC);
+    prr_habilitar(_BV(PRADC));
     ADMUX = (1U << REFS0);
     ADCSRA = (1U << ADEN) |
              (1U << ADPS2) | (1U << ADPS1) | (1U << ADPS0);
@@ -580,7 +773,9 @@ static void adc_habilitar(void)
 
 static void adc_deshabilitar(void)
 {
-    ADCSRA &= (uint8_t)~(1U << ADEN);
+    if ((PRR & PRR_ADC) == 0U && (ADCSRA & _BV(ADSC)) == 0U) {
+        ADCSRA &= (uint8_t)~_BV(ADEN);
+    }
 }
 
 static void adc_init(void)
@@ -592,7 +787,7 @@ static void adc_init(void)
 
 static uint16_t adc_leer_a0(void)
 {
-    if ((ADCSRA & (1U << ADEN)) == 0U) {
+    if ((PRR & PRR_ADC) != 0U || (ADCSRA & _BV(ADEN)) == 0U) {
         adc_habilitar();
     }
 
@@ -651,7 +846,7 @@ static uint8_t twi_esperar(void)
 
 static void twi_init(void)
 {
-    PRR &= (uint8_t)~_BV(PRTWI);
+    prr_habilitar(_BV(PRTWI));
     DDRC &= (uint8_t)~((1U << DDC4) | (1U << DDC5));
     PORTC |= (1U << PORTC4) | (1U << PORTC5);
 
@@ -664,6 +859,7 @@ static uint8_t twi_iniciar(uint8_t direccion_escritura)
 {
     uint8_t estado_twi;
 
+    twi_fase = TWI_TRANSFIRIENDO;
     TWCR = (1U << TWINT) | (1U << TWSTA) | (1U << TWEN);
     if (!twi_esperar()) {
         return 0U;
@@ -699,10 +895,12 @@ static void twi_stop(void)
 {
     uint16_t timeout;
 
+    twi_fase = TWI_STOP_PENDIENTE;
     TWCR = (1U << TWINT) | (1U << TWEN) | (1U << TWSTO);
 
     for (timeout = 0U; timeout < 3000U; timeout++) {
         if ((TWCR & (1U << TWSTO)) == 0U) {
+            twi_fase = TWI_LIBRE;
             break;
         }
         _delay_us(1);
@@ -972,6 +1170,7 @@ static void cancelar_dht(void)
     SREG = sreg;
 
     liberar_dht();
+    (void)prr_deshabilitar(PRR_TIMER2);
     bandera_dht = 0U;
 }
 
@@ -1002,6 +1201,8 @@ static void dht_liberar_y_capturar(uint32_t ahora)
     uint8_t sreg = SREG;
 
     cli();
+    prr_habilitar(PRR_TIMER2);     /* PRR=0x04 mientras se capturan pulsos. */
+    TCCR2B = _BV(CS21);            /* 0,5 us/cuenta; configurar con reloj disponible. */
     liberar_dht();
 
     dht_nivel_anterior =
@@ -1028,6 +1229,7 @@ static void dht_procesar_resultado(void)
     datos[3] = dht_datos[3];
     datos[4] = dht_datos[4];
     estado_dht = DHT_REPOSO;
+    (void)prr_deshabilitar(PRR_TIMER2); /* Termino captura: PRR vuelve a 0x44. */
     SREG = sreg;
 
     if ((uint8_t)(datos[0] + datos[1] + datos[2] + datos[3]) ==
@@ -1109,12 +1311,16 @@ static void reloj_capturar_y_detener(void)
     }
     tiempo_ms += parcial_us / 1000UL;
     fraccion_reloj_us = (uint16_t)(parcial_us % 1000UL);
-    TCCR0B = 0U;
-    TCCR1B = _BV(WGM12);
-    TIMSK0 = 0U;
-    TIMSK1 = 0U;
-    TIFR0 = _BV(OCF0A) | _BV(OCF0B) | _BV(TOV0);
-    TIFR1 = _BV(OCF1A) | _BV(OCF1B) | _BV(TOV1);
+    if ((PRR & PRR_TIMER0) == 0U) {
+        TCCR0B = 0U;
+        TIMSK0 = 0U;
+        TIFR0 = _BV(OCF0A) | _BV(OCF0B) | _BV(TOV0);
+    }
+    if ((PRR & PRR_TIMER1) == 0U) {
+        TCCR1B = _BV(WGM12);
+        TIMSK1 = 0U;
+        TIFR1 = _BV(OCF1A) | _BV(OCF1B) | _BV(TOV1);
+    }
     modo_reloj = RELOJ_DETENIDO;
 }
 
@@ -1144,14 +1350,15 @@ static void reloj_standby(void)
     bandera_reloj = 0U;
     modo_reloj = RELOJ_STANDBY;
     timer1_init();                 /* Solo 10 IRQ/s para contar la inactividad. */
-    TCCR2B = 0U;
-    PRR |= _BV(PRTIM0) | _BV(PRTIM2) | _BV(PRADC) | _BV(PRSPI);
+    (void)prr_deshabilitar(PRR_TIMER0 | PRR_TIMER2 | PRR_ADC | PRR_SPI);
     SREG = sreg;
 }
 
 static void restaurar_para_activo(void)
 {
     reloj_rapido();
+    /* SEGURO ya tenia Timer0 rapido, pero habia quitado el reloj de Timer1. */
+    if ((PRR & PRR_TIMER1) != 0U) timer1_init();
     twi_init();                    /* Antes de intentar escribir a la LCD. */
     adc_habilitar();
 }
@@ -1221,16 +1428,20 @@ static void dormir_powerdown(void)
     prr_anterior = PRR;
     usart_anterior = UCSR0B;
     reloj_capturar_y_detener();
-    adc_deshabilitar();
-    UCSR0B = 0U;                    /* RX, TX y sus IRQ quedan inactivos. */
-    uart_linea_longitud = 0U;        /* No unir una trama vieja con datos del despertar. */
+    if (!prr_fijar_perfil(PRR_DORMIR)) {
+        /* Un recurso ocupado impide dormir: conservar main y su reloj. */
+        reloj_standby();
+        wdt_despues_powerdown();
+        en_powerdown = 0U;
+        int0_flanco_descendente();
+        SREG = sreg;
+        return;
+    }
+    uart_linea_longitud = 0U;
     uart_descartar_linea = 0U;
-    TWCR = 0U;                     /* La ultima escritura LCD ya termino. */
     PCMSK2 &= (uint8_t)~_BV(PCINT20);
     PCICR &= (uint8_t)~_BV(PCIE2);
-    TCCR2B = 0U;
-    TIMSK2 = 0U;
-    PRR |= PRR_DORMIR;             /* Mascara explicita, nunca 0xFF. */
+    prr_ultimo_sueno = PRR;         /* Copia historica: UART ahora no tiene reloj. */
 
     set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
@@ -1240,13 +1451,15 @@ static void dormir_powerdown(void)
     sleep_disable();
 
     /* Se continua aqui tras el despertar; la SRAM conserva la FSM. */
-    PRR = prr_anterior;
+    (void)prr_fijar_perfil(prr_anterior);
+    uart_init();                   /* Reconfigurar USART tras devolverle el reloj. */
     UCSR0B = usart_anterior;
     reloj_standby();               /* Reloj disponible antes de validar el evento. */
     wdt_despues_powerdown();
     en_powerdown = 0U;
     int0_flanco_descendente();
     SREG = sreg;
+    prr_informar_valor("ULTIMO_SUENO", prr_ultimo_sueno);
     /* main valida el boton y entrar_activo restaura el resto. */
 }
 
@@ -1280,7 +1493,9 @@ static void entrar_activo(uint32_t ahora, uint8_t registrar_actividad)
         ultima_actividad = ahora;
     }
 
+    (void)prr_fijar_perfil(PRR_ACTIVO);
     (void)uart_enviar_texto("EV:ACTIVO\r\n");
+    prr_informar("ACTIVO");
     bandera_adc = 1U;
     bandera_lcd = 1U;
     bandera_dht = 1U;
@@ -1297,9 +1512,9 @@ static void entrar_standby(void)
     mostrar_standby();
     apagar_sonido();
     reloj_standby();
-    TWCR = 0U;
-    PRR |= _BV(PRTWI);              /* El PCF8574 conserva el mensaje y la luz. */
+    (void)prr_fijar_perfil(PRR_STANDBY);
     (void)uart_enviar_texto("EV:STANDBY\r\n");
+    prr_informar("STANDBY");
 }
 
 static void entrar_apagado(void)
@@ -1316,7 +1531,9 @@ static void entrar_apagado(void)
     _delay_ms(5);
     lcd_comando(0x08U);
     lcd_apagar_luz();
+    (void)prr_fijar_perfil(PRR_STANDBY); /* T1 y UART hasta completar los avisos. */
     (void)uart_enviar_texto("EV:APAGADO\r\n");
+    prr_informar("PREVIO_SUENO");
 }
 
 static void entrar_seguro(void)
@@ -1330,7 +1547,9 @@ static void entrar_seguro(void)
     lcd_comando(0x0CU);
     mostrar_seguro();
     iniciar_alarma();
+    (void)prr_fijar_perfil(PRR_SEGURO); /* Timer0 mantiene alarma y pulsador. */
     (void)uart_enviar_texto("EV:SEGURO\r\n");
+    prr_informar("SEGURO");
 }
 
 static void revisar_inactividad(uint32_t ahora)
@@ -1421,9 +1640,12 @@ static void uart_ejecutar_linea(uint32_t ahora)
         }
         (void)uart_enviar_texto("OK:EMERGENCIA\r\n");
     } else if (strcmp(uart_linea, "ACTIVO") == 0 ||
-               strcmp(uart_linea, "ESTADO") == 0) {
+               strcmp(uart_linea, "ESTADO") == 0 ||
+               strcmp(uart_linea, "PRR") == 0) {
         if (estado == ESTADO_SEGURO) {
-            if (strcmp(uart_linea, "ESTADO") == 0) {
+            if (strcmp(uart_linea, "PRR") == 0) {
+                prr_informar("SEGURO");
+            } else if (strcmp(uart_linea, "ESTADO") == 0) {
                 uart_informar_estado();
             } else {
                 (void)uart_enviar_texto("BLOQUEADO:EMERGENCIA\r\n");
@@ -1433,7 +1655,11 @@ static void uart_ejecutar_linea(uint32_t ahora)
                 entrar_activo(ahora, 1U);
             }
             ultima_actividad = leer_tiempo();
-            uart_informar_estado();
+            if (strcmp(uart_linea, "PRR") == 0) {
+                prr_informar("ACTUAL");
+            } else {
+                uart_informar_estado();
+            }
         }
     } else {
         (void)uart_enviar_texto("ERROR:COMANDO\r\n");
@@ -1635,7 +1861,7 @@ static void wdt_procesar_evento(void)
     adc_habilitar();
     valor_adc_actual = adc_leer_a0();
     adc_deshabilitar();
-    PRR |= _BV(PRADC);
+    (void)prr_deshabilitar(PRR_ADC);
     PORTB &= (uint8_t)~_BV(WDT_PRUEBA_PIN); // Fin del trabajo de lectura.
 
     strcpy(mensaje, "WDT,evento=");
@@ -1739,7 +1965,7 @@ int main(void)
 
         linea_limpiar(mensaje1);
         linea_limpiar(mensaje2);
-        linea_texto(mensaje1, 0U, "LAB 5 - B WDT");
+        linea_texto(mensaje1, 0U, "LAB 5 - B PRR");
         linea_texto(mensaje2, 0U, "INICIANDO...");
         lcd_linea(0U, mensaje1);
         lcd_linea(1U, mensaje2);
@@ -1754,7 +1980,7 @@ int main(void)
     referencia_adc_valida = 1U;
     ultima_actividad = 0UL;
     uart_init();
-    (void)uart_enviar_texto("LAB5:B2\r\n");
+    (void)uart_enviar_texto("LAB5:B3\r\n");
     if ((causa_reinicio & _BV(WDRF)) != 0U ||
         (((causa_reinicio & _BV(PORF)) == 0U) &&
          marca_bloqueo == MARCA_BLOQUEO_WDT &&
@@ -1769,7 +1995,9 @@ int main(void)
         (void)uart_enviar_texto("RECUPERACION:SEGURO\r\n");
     } else {
         mostrar_activo();
+        (void)prr_fijar_perfil(PRR_ACTIVO);
         (void)uart_enviar_texto("EV:ACTIVO\r\n");
+        prr_informar("ACTIVO");
     }
     marca_bloqueo = 0UL;           /* Evita repetir la recuperacion en otro reset. */
     marca_bloqueo_inversa = 0UL;
