@@ -1,0 +1,32 @@
+DATOS DEL PROBLEMA C
+
+medicion_RESET.csv
+  Registro temporal completo con WDT configurado como RESET.
+
+medicion_DESPERTADOR.csv
+  Registro temporal completo con WDT configurado como DESPERTADOR.
+
+Columnas de los archivos de medicion:
+  tiempo_s: tiempo transcurrido desde el inicio del registro.
+  micros_arduino: marca temporal enviada por el Arduino de adquisicion.
+  adc_raw: lectura de 10 bits del ADC.
+  vout_amplificador_V: salida reconstruida del LM358 antes del divisor.
+  vshunt_V: caida calculada sobre la resistencia shunt.
+  corriente_mA: corriente calculada del sistema.
+  estado: ACTIVO, STANDBY o APAGADO.
+
+resumen_comparativo.csv
+  Tabla compacta preparada para lectura y correccion. No reemplaza los archivos
+  temporales originales. En DESPERTADOR, el valor ACTIVO corresponde a dos
+  tramos estables porque el primer tramo etiquetado incluia el nivel anterior.
+
+Configuracion de conversion:
+  Shunt: 5 ohm.
+  LM358: ganancia 11.
+  Divisor hacia A0: 10 kohm / 10 kohm, factor de reconstruccion 2.
+  Referencia ADC adoptada: 5 V.
+  Alimentacion del sistema durante el ensayo: 9 V por VIN.
+
+Los valores del multimetro AM-510 fueron obtenidos antes de incorporar esta
+cadena de adquisicion y con otro punto de medida. Se conservan como contraste
+cualitativo, pero no se mezclan con los CSV para calcular error porcentual.
