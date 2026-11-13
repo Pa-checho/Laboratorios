@@ -1,0 +1,7 @@
+configuracion,estado,corriente_media_mA,desviacion_mA,corriente_min_mA,corriente_max_mA,potencia_media_mW,observacion
+RESET,ACTIVO,110.59,9.44,63.22,138.93,995.32,promedio temporal del CSV
+RESET,STANDBY,90.52,6.08,39.58,113.34,814.71,promedio temporal del CSV
+RESET,APAGADO,60.55,7.50,13.99,138.93,544.93,incluye transitorios
+DESPERTADOR,ACTIVO,103.47,,,,931.23,promedio de dos tramos estables
+DESPERTADOR,STANDBY,88.71,5.38,47.40,106.05,798.39,promedio temporal del CSV
+DESPERTADOR,APAGADO,61.53,8.11,15.05,141.42,553.77,incluye despertares periodicos
