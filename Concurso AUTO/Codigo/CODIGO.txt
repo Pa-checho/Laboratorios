@@ -1,0 +1,338 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/atomic.h>
+#include <stdint.h>
+
+/*
+ * AUTO CONCURSO - Arduino Uno / ATmega328P a 16 MHz
+ *
+ * Bluetooth HC-05: TX del modulo -> D0 (RX del Arduino), 9600 baudios.
+ *
+ * L298N:
+ *   Motor izquierdo: ENA = D5, IN1 = D7,  IN2 = D8
+ *   Motor derecho:   ENB = D6, IN3 = D11, IN4 = D12
+ *
+ * Servos:
+ *   D9  -> servo corto, abre y cierra la garra.
+ *   D10 -> servo largo, sube y baja el brazo.
+ *
+ * Comandos de la app:
+ *   M<marcha>,<giro> + salto de linea, cada 50 ms.
+ *   U = subir, B = bajar, V = mantener altura, G = alternar garra.
+ */
+
+// Ajustes del montaje
+#define PWM_IZQUIERDO       130
+#define PWM_DERECHO         190
+
+#define GARRA_ABIERTA_US   1560
+#define GARRA_CERRADA_US   1330
+
+#define BRAZO_ABAJO_US      750
+#define BRAZO_MEDIO_US     1475
+#define BRAZO_ARRIBA_US    2200
+
+#define PASO_SERVO_US        10
+#define PERIODO_SERVO_MS     20
+#define TIEMPO_CORTE_MS     300
+
+static volatile uint32_t reloj_ms = 0;
+static uint32_t ultima_trama_ms = 0;
+static uint32_t ultimo_paso_ms = 0;
+static uint8_t enlace_activo = 0;
+
+static uint16_t brazo_actual = BRAZO_MEDIO_US;
+static uint16_t brazo_objetivo = BRAZO_MEDIO_US;
+static uint16_t garra_actual = GARRA_ABIERTA_US;
+static uint16_t garra_objetivo = GARRA_ABIERTA_US;
+static uint8_t garra_abierta = 1;
+
+enum { RX_LIBRE, RX_MOVIMIENTO, RX_DESCARTAR };
+static uint8_t estado_rx = RX_LIBRE;
+static char trama[16];
+static uint8_t longitud = 0;
+
+// ---------------- RELOJ DE 1 ms ----------------
+
+ISR(TIMER2_COMPA_vect)
+{
+    reloj_ms++;
+}
+
+static uint32_t tiempo_ms(void)
+{
+    uint32_t copia;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        copia = reloj_ms;
+    }
+    return copia;
+}
+
+static void iniciar_reloj(void)
+{
+    TCCR2B = 0;
+    TCCR2A = (1 << WGM21);
+    TCNT2 = 0;
+    OCR2A = 249;
+    TIFR2 = (1 << OCF2A);
+    TIMSK2 = (1 << OCIE2A);
+    TCCR2B = (1 << CS22);  // 16 MHz / 64 / 250 = 1000 Hz
+}
+
+// ---------------- MOTORES ----------------
+
+static void iniciar_motores(void)
+{
+    // Arranque con las dos salidas del puente detenidas.
+    PORTD &= ~((1 << PD5) | (1 << PD6) | (1 << PD7));
+    PORTB &= ~((1 << PB0) | (1 << PB3) | (1 << PB4));
+
+    DDRD |= (1 << PD5) | (1 << PD6) | (1 << PD7);
+    DDRB |= (1 << PB0) | (1 << PB3) | (1 << PB4);
+
+    // Timer0 genera PWM en D5 y D6. El reloj del programa usa Timer2.
+    TCCR0B = 0;
+    TIMSK0 = 0;
+    TCNT0 = 0;
+    OCR0A = 0;
+    OCR0B = 0;
+    TCCR0A = (1 << COM0A1) | (1 << COM0B1) | (1 << WGM00);
+    TCCR0B = (1 << CS01) | (1 << CS00);
+}
+
+static int16_t limitar_porcentaje(int16_t valor)
+{
+    if (valor > 100) return 100;
+    if (valor < -100) return -100;
+    return valor;
+}
+
+static void motor_izquierdo(int16_t pwm)
+{
+    PORTD &= ~(1 << PD7);  // IN1
+    PORTB &= ~(1 << PB0);  // IN2
+
+    if (pwm > 0) PORTD |= (1 << PD7);
+    if (pwm < 0) PORTB |= (1 << PB0);
+
+    OCR0B = (uint8_t)(pwm < 0 ? -pwm : pwm);  // ENA, D5
+}
+
+static void motor_derecho(int16_t pwm)
+{
+    PORTB &= ~((1 << PB3) | (1 << PB4));  // IN3 e IN4
+
+    if (pwm > 0) PORTB |= (1 << PB3);
+    if (pwm < 0) PORTB |= (1 << PB4);
+
+    OCR0A = (uint8_t)(pwm < 0 ? -pwm : pwm);  // ENB, D6
+}
+
+static void mover_auto(int16_t marcha, int16_t giro)
+{
+    int16_t avance = -marcha;
+    int16_t izquierda = limitar_porcentaje(avance - giro);
+    int16_t derecha   = limitar_porcentaje(avance + giro);
+
+    motor_izquierdo(izquierda * PWM_IZQUIERDO / 100);
+    motor_derecho(derecha * PWM_DERECHO / 100);
+}
+
+// ---------------- BRAZO Y GARRA ----------------
+
+static void iniciar_servos(void)
+{
+    // Timer1: pulsos cada 20 ms. Cada cuenta equivale a 0,5 us.
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+
+    DDRB |= (1 << PB1) | (1 << PB2);
+    ICR1 = 39999;
+    OCR1A = garra_actual * 2U - 1U;
+    OCR1B = brazo_actual * 2U - 1U;
+
+    TCCR1A = (1 << COM1A1) | (1 << COM1B1) | (1 << WGM11);
+    TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11);
+}
+
+static uint16_t acercar(uint16_t actual, uint16_t objetivo)
+{
+    if (actual < objetivo) {
+        if (objetivo - actual <= PASO_SERVO_US) return objetivo;
+        return actual + PASO_SERVO_US;
+    }
+
+    if (actual > objetivo) {
+        if (actual - objetivo <= PASO_SERVO_US) return objetivo;
+        return actual - PASO_SERVO_US;
+    }
+
+    return actual;
+}
+
+static void actualizar_servos(uint32_t ahora)
+{
+    if ((uint32_t)(ahora - ultimo_paso_ms) < PERIODO_SERVO_MS) return;
+    ultimo_paso_ms = ahora;
+
+    garra_actual = acercar(garra_actual, garra_objetivo);
+    brazo_actual = acercar(brazo_actual, brazo_objetivo);
+
+    OCR1A = garra_actual * 2U - 1U;  // D9
+    OCR1B = brazo_actual * 2U - 1U;  // D10
+}
+
+// ---------------- BLUETOOTH ----------------
+
+static void iniciar_bluetooth(void)
+{
+    UCSR0B = 0;
+    UCSR0A = 0;
+    UBRR0H = 0;
+    UBRR0L = 103;  // 9600 baudios a 16 MHz
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);  // 8 bits, 1 stop
+    UCSR0B = (1 << RXEN0);
+}
+
+// Lee un entero entre -100 y 100 y deja el cursor en el separador.
+static uint8_t leer_porcentaje(const char **cursor, int16_t *resultado)
+{
+    const char *p = *cursor;
+    int16_t valor = 0;
+    uint8_t negativo = (*p == '-');
+
+    if (*p == '-' || *p == '+') p++;
+    if (*p < '0' || *p > '9') return 0;
+
+    while (*p >= '0' && *p <= '9') {
+        valor = valor * 10 + (*p - '0');
+        if (valor > 100) return 0;
+        p++;
+    }
+
+    *resultado = negativo ? -valor : valor;
+    *cursor = p;
+    return 1;
+}
+
+static void procesar_movimiento(void)
+{
+    int16_t marcha, giro;
+    const char *p = trama;
+
+    trama[longitud] = '\0';
+
+    if (!leer_porcentaje(&p, &marcha)) return;
+    if (*p != ',') return;
+    p++;
+    if (!leer_porcentaje(&p, &giro)) return;
+    if (*p != '\0') return;
+
+    mover_auto(marcha, giro);
+    ultima_trama_ms = tiempo_ms();
+    enlace_activo = 1;
+}
+
+static void procesar_boton(uint8_t dato)
+{
+    switch (dato) {
+        case 'U':
+            brazo_objetivo = BRAZO_ARRIBA_US;
+            break;
+
+        case 'B':
+            brazo_objetivo = BRAZO_ABAJO_US;
+            break;
+
+        case 'V':
+            brazo_objetivo = brazo_actual;
+            break;
+
+        case 'G':
+            garra_abierta = !garra_abierta;
+            garra_objetivo = garra_abierta ? GARRA_ABIERTA_US
+                                          : GARRA_CERRADA_US;
+            break;
+
+        default:
+            return;
+    }
+
+    // Cubre un boton pulsado antes de recibir la primera trama de marcha.
+    if (!enlace_activo) {
+        ultima_trama_ms = tiempo_ms();
+        enlace_activo = 1;
+    }
+}
+
+static void recibir_byte(uint8_t dato)
+{
+    if (dato == 'M') {
+        estado_rx = RX_MOVIMIENTO;
+        longitud = 0;
+        return;
+    }
+
+    if (dato == '\n' || dato == '\r') {
+        if (estado_rx == RX_MOVIMIENTO) procesar_movimiento();
+        estado_rx = RX_LIBRE;
+        return;
+    }
+
+    if (estado_rx == RX_LIBRE) {
+        procesar_boton(dato);
+        return;
+    }
+
+    if (estado_rx == RX_MOVIMIENTO) {
+        uint8_t permitido = (dato >= '0' && dato <= '9') ||
+                            dato == ',' || dato == '-' || dato == '+';
+
+        if (!permitido || longitud >= sizeof(trama) - 1) {
+            estado_rx = RX_DESCARTAR;
+        } else {
+            trama[longitud++] = (char)dato;
+        }
+    }
+}
+
+// ---------------- PROGRAMA PRINCIPAL ----------------
+
+void setup()
+{
+    cli();
+    iniciar_motores();
+    iniciar_servos();
+    iniciar_bluetooth();
+    iniciar_reloj();
+    sei();
+}
+
+void loop()
+{
+    if (UCSR0A & (1 << RXC0)) {
+        uint8_t estado = UCSR0A;
+        uint8_t dato = UDR0;
+
+        if (estado & ((1 << FE0) | (1 << DOR0) | (1 << UPE0))) {
+            estado_rx = RX_DESCARTAR;
+        } else {
+            recibir_byte(dato);
+        }
+    }
+
+    uint32_t ahora = tiempo_ms();
+
+    // Si la app deja de enviar la marcha, parar y mantener ambos servos.
+    if (enlace_activo &&
+        (uint32_t)(ahora - ultima_trama_ms) >= TIEMPO_CORTE_MS) {
+        mover_auto(0, 0);
+        brazo_objetivo = brazo_actual;
+        garra_objetivo = garra_actual;
+        estado_rx = RX_LIBRE;
+        enlace_activo = 0;
+    }
+
+    actualizar_servos(ahora);
+}
