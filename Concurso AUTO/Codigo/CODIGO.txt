@@ -1,3 +1,7 @@
+#ifndef F_CPU
+#define F_CPU 16000000UL
+#endif
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/atomic.h>
@@ -22,8 +26,8 @@
  */
 
 // Ajustes del montaje
-#define PWM_IZQUIERDO       130
-#define PWM_DERECHO         190
+#define PWM_IZQUIERDO       160
+#define PWM_DERECHO         180
 
 #define GARRA_ABIERTA_US   1560
 #define GARRA_CERRADA_US   1330
@@ -131,8 +135,8 @@ static void motor_derecho(int16_t pwm)
 static void mover_auto(int16_t marcha, int16_t giro)
 {
     int16_t avance = -marcha;
-    int16_t izquierda = limitar_porcentaje(avance - giro);
-    int16_t derecha   = limitar_porcentaje(avance + giro);
+    int16_t izquierda = limitar_porcentaje(avance + giro);
+    int16_t derecha   = limitar_porcentaje(avance - giro);
 
     motor_izquierdo(izquierda * PWM_IZQUIERDO / 100);
     motor_derecho(derecha * PWM_DERECHO / 100);
@@ -236,27 +240,18 @@ static void procesar_movimiento(void)
 
 static void procesar_boton(uint8_t dato)
 {
-    switch (dato) {
-        case 'U':
-            brazo_objetivo = BRAZO_ARRIBA_US;
-            break;
-
-        case 'B':
-            brazo_objetivo = BRAZO_ABAJO_US;
-            break;
-
-        case 'V':
-            brazo_objetivo = brazo_actual;
-            break;
-
-        case 'G':
-            garra_abierta = !garra_abierta;
-            garra_objetivo = garra_abierta ? GARRA_ABIERTA_US
-                                          : GARRA_CERRADA_US;
-            break;
-
-        default:
-            return;
+    if (dato == 'U' || dato == 'u') {
+        brazo_objetivo = BRAZO_ARRIBA_US;
+    } else if (dato == 'B' || dato == 'b') {
+        brazo_objetivo = BRAZO_ABAJO_US;
+    } else if (dato == 'V' || dato == 'v') {
+        brazo_objetivo = brazo_actual;
+    } else if (dato == 'G' || dato == 'g') {
+        garra_abierta = !garra_abierta;
+        garra_objetivo = garra_abierta ? GARRA_ABIERTA_US
+                                       : GARRA_CERRADA_US;
+    } else {
+        return;
     }
 
     // Cubre un boton pulsado antes de recibir la primera trama de marcha.
@@ -299,7 +294,7 @@ static void recibir_byte(uint8_t dato)
 
 // ---------------- PROGRAMA PRINCIPAL ----------------
 
-void setup()
+int main(void)
 {
     cli();
     iniciar_motores();
@@ -307,32 +302,31 @@ void setup()
     iniciar_bluetooth();
     iniciar_reloj();
     sei();
-}
 
-void loop()
-{
-    if (UCSR0A & (1 << RXC0)) {
-        uint8_t estado = UCSR0A;
-        uint8_t dato = UDR0;
+    while (1) {
+        if (UCSR0A & (1 << RXC0)) {
+            uint8_t estado = UCSR0A;
+            uint8_t dato = UDR0;
 
-        if (estado & ((1 << FE0) | (1 << DOR0) | (1 << UPE0))) {
-            estado_rx = RX_DESCARTAR;
-        } else {
-            recibir_byte(dato);
+            if (estado & ((1 << FE0) | (1 << DOR0) | (1 << UPE0))) {
+                estado_rx = RX_DESCARTAR;
+            } else {
+                recibir_byte(dato);
+            }
         }
+
+        uint32_t ahora = tiempo_ms();
+
+        // Si la app deja de enviar datos, el auto se detiene.
+        if (enlace_activo &&
+            (uint32_t)(ahora - ultima_trama_ms) >= TIEMPO_CORTE_MS) {
+            mover_auto(0, 0);
+            brazo_objetivo = brazo_actual;
+            garra_objetivo = garra_actual;
+            estado_rx = RX_LIBRE;
+            enlace_activo = 0;
+        }
+
+        actualizar_servos(ahora);
     }
-
-    uint32_t ahora = tiempo_ms();
-
-    // Si la app deja de enviar la marcha, parar y mantener ambos servos.
-    if (enlace_activo &&
-        (uint32_t)(ahora - ultima_trama_ms) >= TIEMPO_CORTE_MS) {
-        mover_auto(0, 0);
-        brazo_objetivo = brazo_actual;
-        garra_objetivo = garra_actual;
-        estado_rx = RX_LIBRE;
-        enlace_activo = 0;
-    }
-
-    actualizar_servos(ahora);
 }
