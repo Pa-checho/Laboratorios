@@ -5,6 +5,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <util/atomic.h>
+#include <util/delay.h>
 #include <stdint.h>
 
 /*
@@ -40,6 +41,15 @@
 #define PERIODO_SERVO_MS     20
 #define TIEMPO_CORTE_MS     300
 
+#define DISTANCIA_ALERTA_CM   20
+#define DISTANCIA_LIBERAR_CM  25
+#define PERIODO_MEDICION_MS   70
+#define TIMEOUT_ECO_US     30000UL
+
+#define SENSOR_REPOSO          0
+#define SENSOR_ESPERA_SUBIDA   1
+#define SENSOR_ESPERA_BAJADA   2
+
 static volatile uint32_t reloj_ms = 0;
 static uint32_t ultima_trama_ms = 0;
 static uint32_t ultimo_paso_ms = 0;
@@ -50,6 +60,13 @@ static uint16_t brazo_objetivo = BRAZO_MEDIO_US;
 static uint16_t garra_actual = GARRA_ABIERTA_US;
 static uint16_t garra_objetivo = GARRA_ABIERTA_US;
 static uint8_t garra_abierta = 1;
+
+static uint8_t estado_sensor = SENSOR_REPOSO;
+static uint32_t inicio_espera_eco_us = 0;
+static uint32_t inicio_pulso_eco_us = 0;
+static uint32_t ultima_medicion_ms = 0;
+static uint16_t distancia_cm = 0xFFFFU;
+static uint8_t alerta_proximidad = 0;
 
 enum { RX_LIBRE, RX_MOVIMIENTO, RX_DESCARTAR };
 static uint8_t estado_rx = RX_LIBRE;
@@ -70,6 +87,24 @@ static uint32_t tiempo_ms(void)
         copia = reloj_ms;
     }
     return copia;
+}
+
+static uint32_t tiempo_us(void)
+{
+    uint32_t milisegundos;
+    uint8_t cuenta;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        milisegundos = reloj_ms;
+        cuenta = TCNT2;
+
+        if ((TIFR2 & (1 << OCF2A)) && cuenta < 249U) {
+            milisegundos++;
+            cuenta = TCNT2;
+        }
+    }
+
+    return (milisegundos * 1000UL) + ((uint32_t)cuenta * 4UL);
 }
 
 static void iniciar_reloj(void)
@@ -187,6 +222,81 @@ static void actualizar_servos(uint32_t ahora)
     OCR1B = brazo_actual * 2U - 1U;  // D10
 }
 
+// ---------------- SENSOR ULTRASONICO ----------------
+
+static void iniciar_sensor(void)
+{
+    // TRIG en D3 y ECHO en D2.
+    DDRD |= (1 << PD3);
+    PORTD &= ~(1 << PD3);
+    DDRD &= ~(1 << PD2);
+    PORTD &= ~(1 << PD2);
+}
+
+static void iniciar_medicion(void)
+{
+    PORTD &= ~(1 << PD3);
+    _delay_us(2);
+    PORTD |= (1 << PD3);
+    _delay_us(10);
+    PORTD &= ~(1 << PD3);
+
+    inicio_espera_eco_us = tiempo_us();
+    estado_sensor = SENSOR_ESPERA_SUBIDA;
+}
+
+static void medicion_sin_eco(void)
+{
+    distancia_cm = 0xFFFFU;
+    alerta_proximidad = 0;
+    estado_sensor = SENSOR_REPOSO;
+}
+
+static void actualizar_sensor(uint32_t ahora_ms)
+{
+    uint32_t ahora_us = tiempo_us();
+
+    if (estado_sensor == SENSOR_REPOSO) {
+        if ((uint32_t)(ahora_ms - ultima_medicion_ms) >=
+            PERIODO_MEDICION_MS) {
+            ultima_medicion_ms = ahora_ms;
+            iniciar_medicion();
+        }
+        return;
+    }
+
+    if (estado_sensor == SENSOR_ESPERA_SUBIDA) {
+        if (PIND & (1 << PD2)) {
+            inicio_pulso_eco_us = ahora_us;
+            estado_sensor = SENSOR_ESPERA_BAJADA;
+        } else if ((uint32_t)(ahora_us - inicio_espera_eco_us) >=
+                   TIMEOUT_ECO_US) {
+            medicion_sin_eco();
+        }
+        return;
+    }
+
+    if (estado_sensor == SENSOR_ESPERA_BAJADA) {
+        if (!(PIND & (1 << PD2))) {
+            uint32_t duracion_us = ahora_us - inicio_pulso_eco_us;
+            distancia_cm = (uint16_t)(duracion_us / 58UL);
+
+            if (!alerta_proximidad && distancia_cm > 0U &&
+                distancia_cm <= DISTANCIA_ALERTA_CM) {
+                alerta_proximidad = 1;
+            } else if (alerta_proximidad &&
+                       distancia_cm >= DISTANCIA_LIBERAR_CM) {
+                alerta_proximidad = 0;
+            }
+
+            estado_sensor = SENSOR_REPOSO;
+        } else if ((uint32_t)(ahora_us - inicio_pulso_eco_us) >=
+                   TIMEOUT_ECO_US) {
+            medicion_sin_eco();
+        }
+    }
+}
+
 // ---------------- BLUETOOTH ----------------
 
 static void iniciar_bluetooth(void)
@@ -299,6 +409,7 @@ int main(void)
     cli();
     iniciar_motores();
     iniciar_servos();
+    iniciar_sensor();
     iniciar_bluetooth();
     iniciar_reloj();
     sei();
@@ -328,5 +439,6 @@ int main(void)
         }
 
         actualizar_servos(ahora);
+        actualizar_sensor(ahora);
     }
 }
