@@ -21,9 +21,12 @@
  *   D9  -> servo corto, abre y cierra la garra.
  *   D10 -> servo largo, sube y baja el brazo.
  *
+ * Sensor HC-SR04: ECHO = A0, TRIG = A1.
+ *
  * Comandos de la app:
  *   M<marcha>,<giro> + salto de linea, cada 50 ms.
  *   U = subir, B = bajar, V = mantener altura, G = alternar garra.
+ *   El Arduino responde P,<distancia_cm>,<alerta> cada 200 ms.
  */
 
 // Ajustes del montaje
@@ -44,7 +47,13 @@
 #define DISTANCIA_ALERTA_CM   20
 #define DISTANCIA_LIBERAR_CM  25
 #define PERIODO_MEDICION_MS   70
+#define PERIODO_ENVIO_MS     200
 #define TIMEOUT_ECO_US     30000UL
+#define TX_BUFFER_TAM          16
+
+#if TX_BUFFER_TAM < 10
+#error El buffer TX no alcanza para la trama de proximidad
+#endif
 
 #define SENSOR_REPOSO          0
 #define SENSOR_ESPERA_SUBIDA   1
@@ -65,8 +74,13 @@ static uint8_t estado_sensor = SENSOR_REPOSO;
 static uint32_t inicio_espera_eco_us = 0;
 static uint32_t inicio_pulso_eco_us = 0;
 static uint32_t ultima_medicion_ms = 0;
+static uint32_t ultimo_envio_ms = 0;
 static uint16_t distancia_cm = 0xFFFFU;
 static uint8_t alerta_proximidad = 0;
+
+static volatile char tx_buffer[TX_BUFFER_TAM];
+static volatile uint8_t tx_longitud = 0;
+static volatile uint8_t tx_posicion = 0;
 
 enum { RX_LIBRE, RX_MOVIMIENTO, RX_DESCARTAR };
 static uint8_t estado_rx = RX_LIBRE;
@@ -226,20 +240,20 @@ static void actualizar_servos(uint32_t ahora)
 
 static void iniciar_sensor(void)
 {
-    // TRIG en D3 y ECHO en D2.
-    DDRD |= (1 << PD3);
-    PORTD &= ~(1 << PD3);
-    DDRD &= ~(1 << PD2);
-    PORTD &= ~(1 << PD2);
+    // TRIG en A1 y ECHO en A0.
+    DDRC |= (1 << PC1);
+    PORTC &= ~(1 << PC1);
+    DDRC &= ~(1 << PC0);
+    PORTC &= ~(1 << PC0);
 }
 
 static void iniciar_medicion(void)
 {
-    PORTD &= ~(1 << PD3);
+    PORTC &= ~(1 << PC1);
     _delay_us(2);
-    PORTD |= (1 << PD3);
+    PORTC |= (1 << PC1);
     _delay_us(10);
-    PORTD &= ~(1 << PD3);
+    PORTC &= ~(1 << PC1);
 
     inicio_espera_eco_us = tiempo_us();
     estado_sensor = SENSOR_ESPERA_SUBIDA;
@@ -266,7 +280,7 @@ static void actualizar_sensor(uint32_t ahora_ms)
     }
 
     if (estado_sensor == SENSOR_ESPERA_SUBIDA) {
-        if (PIND & (1 << PD2)) {
+        if (PINC & (1 << PC0)) {
             inicio_pulso_eco_us = ahora_us;
             estado_sensor = SENSOR_ESPERA_BAJADA;
         } else if ((uint32_t)(ahora_us - inicio_espera_eco_us) >=
@@ -277,7 +291,7 @@ static void actualizar_sensor(uint32_t ahora_ms)
     }
 
     if (estado_sensor == SENSOR_ESPERA_BAJADA) {
-        if (!(PIND & (1 << PD2))) {
+        if (!(PINC & (1 << PC0))) {
             uint32_t duracion_us = ahora_us - inicio_pulso_eco_us;
             distancia_cm = (uint16_t)(duracion_us / 58UL);
 
@@ -306,7 +320,83 @@ static void iniciar_bluetooth(void)
     UBRR0H = 0;
     UBRR0L = 103;  // 9600 baudios a 16 MHz
     UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);  // 8 bits, 1 stop
-    UCSR0B = (1 << RXEN0);
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+}
+
+ISR(USART_UDRE_vect)
+{
+    if (tx_posicion < tx_longitud) {
+        UDR0 = tx_buffer[tx_posicion++];
+    } else {
+        UCSR0B &= ~(1 << UDRIE0);
+        tx_longitud = 0;
+        tx_posicion = 0;
+    }
+}
+
+static uint8_t agregar_entero(char *mensaje, uint8_t posicion,
+                              uint16_t valor)
+{
+    char digitos[5];
+    uint8_t cantidad = 0;
+
+    do {
+        digitos[cantidad++] = (char)('0' + valor % 10U);
+        valor /= 10U;
+    } while (valor > 0U);
+
+    while (cantidad > 0U) {
+        mensaje[posicion++] = digitos[--cantidad];
+    }
+
+    return posicion;
+}
+
+static uint8_t comenzar_envio(const char *mensaje, uint8_t cantidad)
+{
+    uint8_t disponible = 0;
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+        if (tx_longitud == 0U && cantidad <= TX_BUFFER_TAM) {
+            for (uint8_t i = 0; i < cantidad; i++) {
+                tx_buffer[i] = mensaje[i];
+            }
+
+            tx_posicion = 0;
+            tx_longitud = cantidad;
+            UCSR0B |= (1 << UDRIE0);
+            disponible = 1;
+        }
+    }
+
+    return disponible;
+}
+
+static void enviar_proximidad(uint32_t ahora)
+{
+    char mensaje[TX_BUFFER_TAM];
+    uint8_t posicion = 0;
+
+    if ((uint32_t)(ahora - ultimo_envio_ms) < PERIODO_ENVIO_MS) return;
+
+    mensaje[posicion++] = 'P';
+    mensaje[posicion++] = ',';
+
+    if (distancia_cm == 0xFFFFU) {
+        mensaje[posicion++] = '-';
+        mensaje[posicion++] = '1';
+    } else {
+        posicion = agregar_entero(mensaje, posicion, distancia_cm);
+    }
+
+    mensaje[posicion++] = ',';
+    mensaje[posicion++] = alerta_proximidad ? '1' : '0';
+    mensaje[posicion++] = '\n';
+
+    // Si el envio anterior sigue activo, se intenta de nuevo en la proxima vuelta.
+    if (comenzar_envio(mensaje, posicion)) {
+        ultimo_envio_ms = ahora;
+    }
 }
 
 // Lee un entero entre -100 y 100 y deja el cursor en el separador.
@@ -440,5 +530,6 @@ int main(void)
 
         actualizar_servos(ahora);
         actualizar_sensor(ahora);
+        enviar_proximidad(ahora);
     }
 }
