@@ -12,7 +12,6 @@ Proyecto de Tecnologías de Microprocesamiento: auto de tracción diferencial co
 | `Codigo/Respaldo/CODIGO_anterior_160_180.txt` | Original anterior conservado; no usar para compilar. |
 | `Aplicacion/APK/` | Instalador Android `AutoPerillaVisible.apk`. |
 | `Aplicacion/AIA/` | Proyecto editable `AutoPerillaVisible.aia`. |
-| `Documentacion/Verificacion.md` | Revisión técnica, mediciones, pruebas confirmadas y pendientes. |
 
 ## Componentes y conexiones
 
@@ -53,7 +52,6 @@ avrdude -p atmega328p -c arduino -P COM3 -b 115200 -D -U 'flash:w:Codigo/build/a
 
 Si AVRDUDE no está en PATH, usar la ruta completa a su ejecutable precedida de `&`; si no encuentra su configuración, agregar `-C 'C:\ruta\a\avrdude.conf'`. Los 115200 baudios corresponden al bootloader; la aplicación usa 9600. No se modifican fusibles del microcontrolador. Referencia: [AVRDUDE, ejemplo para Arduino Uno](https://github.com/avrdudes/avrdude).
 
-**Estado de verificación:** se intentó ejecutar AVR-GCC en las dos instalaciones detectadas, pero Windows informó un error de reasignación de DLL. La compilación y el consumo de memoria quedan pendientes; no se generó un HEX ni se cargó el Arduino.
 
 ## Aplicación
 
